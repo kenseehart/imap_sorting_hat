@@ -16,6 +16,7 @@ Status: Early development
 import os
 import sys
 import imaplib
+import email
 from typing import List, Dict
 import logging
 from getpass import getpass
@@ -24,14 +25,43 @@ from os.path import exists, isdir, join
 from dataclasses import dataclass
 import shelve
 import requests
+from hashlib import sha256
+import re
 
 import imapclient
 import numpy as np
 import openai
+import bs4
+import sklearn
 
 
 logging.basicConfig(level=logging.INFO)
 
+re_header_item = re.compile(r'(\w+): (.*)')
+re_address = re.compile(r'([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)')
+re_newline = re.compile(r'[\r\n]+')
+re_symbol_sequence = re.compile(r'(?<=\s)\W+(?=\s)')
+re_whitespace = re.compile(r'\s+')
+
+
+def html2text(html: str) -> str:
+    '''Convert html to plain-text using beautifulsoup'''
+    soup = bs4.BeautifulSoup(html, 'html.parser')
+    text = soup.get_text(separator=' ')
+    return text
+
+def mesg_to_text(mesg: email.message.Message) -> str:
+    '''Convert an email message to plain-text'''
+    text = ''
+    for part in mesg.walk():
+        if part.get_content_type() == 'text/plain':
+            text += part.get_payload(decode=True).decode('utf-8', errors='ignore')
+        elif part.get_content_type() == 'text/html':
+            text += html2text(part.get_payload(decode=True).decode('utf-8', errors='ignore'))
+
+    text = re_symbol_sequence.sub('', text)
+    text = re_whitespace.sub(' ', text)
+    return text
 
 class Settings(dict):
     '''Settings for the application'''
@@ -144,6 +174,18 @@ class ISH:
         self.imap_conn = None
         self.hkey = b'BODY[HEADER.FIELDS (SUBJECT FROM TO CC BCC)]'
         self.bkey = b'BODY[]'
+        self.max_chars = 16384
+
+    @property
+    def msgs_file(self) -> str:
+        return join(self.settings['data_directory'], 'msgs.db')
+
+    @property
+    def embd_file(self) -> str:
+        return join(self.settings['data_directory'], 'embd.db')
+
+    def mesg_hash(self, mesg: str) -> str:
+        return sha256(mesg['body'].encode('utf-8')).hexdigest()[:12]
 
     def connect_imap(self) -> bool:
         if not self.settings['host'] or not self.settings['username']:
@@ -172,7 +214,7 @@ class ISH:
             return False
         return True
 
-    def configure(self):
+    def configure_and_connect(self):
         '''Configure ish and connect to imap and openai'''
         settings = self.settings
 
@@ -190,7 +232,7 @@ class ISH:
         print('Configuration complete')
 
     def connect_noninteractive(self) -> bool:
-        '''Connect to imap and openai'''
+        '''Connect to imap and openai without user interaction'''
         if not self.connect_imap():
             logging.error(f'Failed to connect to imap server. Configure, or check your settings in {self.settings.settings_file}')
             return False
@@ -201,16 +243,52 @@ class ISH:
 
         return True
 
-    def get_msgs(self, uids:List[int]) -> Dict[int, str]:
+    def filter_text(self, text: str) -> str:
+        '''Filter text to remove unwanted content and make it more readable by openai'''
+
+        # remove mime headers
+
+        # use beautiful soup to remove html tags
+
+        return text
+
+    def parse_mesg(self, mesg: dict) -> dict:
+        '''Parse a raw message into a string'''
+        header = mesg[self.hkey].decode('utf-8')
+        raw_body = mesg[self.bkey]
+        payload = email.message_from_bytes(raw_body)
+        body_text = mesg_to_text(payload)
+        header_lines = re_newline.split(header)
+
+        header_dict = {}
+        for item in header_lines:
+            m = re_header_item.match(item)
+            if m:
+                header_dict[m.group(1)] = m.group(2)
+
+        mesg_dict = {
+            'from': [m.group(1) for m in re_address.finditer(header_dict['From'])],
+            'tocc': [m.group(1) for m in re_address.finditer(header_dict['To'] + header_dict.get('Cc', ''))],
+            'body': f'Subject: {header_dict["Subject"]}. {body_text}',
+        }
+
+        return mesg_dict
+
+    def get_embedding(self, text) -> openai.Embedding:
+        e = openai.Embedding.create(input = [text], model=self.settings['openai_model'])
+        return e
+
+    def get_msgs(self, folder:str, uids:List[int]) -> Dict[int, str]:
         '''Fetch new messages through cache {uid: 'msg'}'''
         d = {}
         new_uids = []
-        filename = join(self.settings['data_directory'], 'msgs.db')
 
-        with shelve.open(filename) as f:
+        with shelve.open(self.msgs_file) as f:
             for uid in uids:
                 try:
-                    d[uid] = f[str(uid)]
+                    hash = f[f'{folder}:{uid}']
+                    mesg = f[f'{hash}.mesg']
+                    d[uid] = mesg
                     continue
                 except KeyError:
                     new_uids.append(uid)
@@ -218,35 +296,52 @@ class ISH:
             if len(new_uids) > 0:
                 msgs = self.imap_conn.fetch(new_uids, [self.hkey, self.bkey])
                 for uid in new_uids:
-                    d[uid] = msgs[uid][self.hkey].decode('utf-8') + msgs[uid][self.bkey].decode('utf-8')
-                    f[str(uid)]  = d[uid]
-
+                    mesg = self.parse_mesg(msgs[uid])
+                    hash = self.mesg_hash(mesg)
+                    f[f'{folder}:{uid}'] = hash
+                    f[f'{hash}.mesg'] = mesg
+                    d[uid] = mesg
         return d
 
-    def get_embeddings(self, uids:List[int]) -> Dict[int, np.ndarray]:
+    def get_embeddings(self, folder:str, uids:List[int]) -> Dict[int, np.ndarray]:
         '''Get embeddings using OpenAI API through cache {uid: embedding}'''
-        d = {}
-        new_uids = []
-        filename = join(self.settings['data_directory'], 'embd.db')
+        dhash = {}
+        dembd = {}
 
-        with shelve.open(filename) as f:
+        # with embd and msgs db open at the same time
+        with shelve.open(self.embd_file) as fe, shelve.open(self.msgs_file) as fm:
+            new_uids = [] # uids that need a new hash
             for uid in uids:
                 try:
-                    d[uid] = f[str(uid)]
+                    dhash[uid] = fm[f'{folder}:{uid}']
+                except KeyError:
+                    new_uids.append(uid)
+                    continue
+
+            dmesg = self.get_msgs(folder, new_uids)
+
+            for uid, mesg in dmesg.items():
+                hash = self.mesg_hash(mesg)
+                dhash[uid] = hash
+                fm[f'{folder}:{uid}'] = hash
+
+            new_uids = [] # uids that need a new embedding
+            for uid, hash in dhash.items(): # dhash is {uid: hash}
+                try:
+                    embd = fe[f'{hash}.embd']
+                    dembd[uid] = embd
                     continue
                 except KeyError:
                     new_uids.append(uid)
 
             if len(new_uids) > 0:
-                msgs = self.get_msgs(new_uids)
+                msgs = self.get_msgs(folder, new_uids)
 
                 for uid, msg in msgs.items():
-                    d[uid] = openai.Completion.create(
-                        engine=self.settings['openai_model'], prompt=msg, max_tokens=5, stop=['\r\n', '\n'], temperature=0.0,
-                        logprobs=10, echo=True, logprobs_token='__logprobs__')['choices'][0]['logprobs']['tokens']
-                    f[str(uid)] = d[uid]
+                    dembd[uid] = self.get_embedding(msg['body'][:self.max_chars])
+                    fe[f'{dhash[uid]}.embd'] = dembd[uid]
 
-        return d
+        return dembd
 
     def process_source_folder(self, folder:str):
 
@@ -264,23 +359,22 @@ class ISH:
             print ('-'*80)
 
 
-    def process_destination_folder(self, imap_conn, folder:str):
+    def process_destination_folder(self, folder:str):
+        imap_conn = self.imap_conn
         imap_conn.select_folder(folder)
 
         # Retrieve the UIDs of all messages in the folder
         uids = imap_conn.search(['ALL'])
+        msgs = self.get_msgs(folder, uids[:20])
+        embd = self.get_embeddings(folder, uids[:20])
 
-        # Print the subjects of all messages
         for uid in uids[:20]:
-            raw_msg = imap_conn.fetch([uid], [b'BODY[HEADER.FIELDS (SUBJECT FROM TO CC BCC)]', b'BODY[]'])
-            content = raw_msg[uid][b'BODY[HEADER.FIELDS (SUBJECT FROM TO CC BCC)]'].decode('utf-8') + raw_msg[uid][b'BODY[]'].decode('utf-8')
-
-            print (content[:4096])
+            print (embd[uid])
             print ('-'*80)
 
     def run(self, interactive:bool) -> int:
         if interactive:
-            self.configure()
+            self.configure_and_connect()
         else:
             if not self.connect_noninteractive():
                 return 1
@@ -293,11 +387,11 @@ class ISH:
         for f in settings['destination_folders']:
             logging.info(f'Destination folder: {f}')
 
+        for f in settings['destination_folders']:
+            self.process_destination_folder(f)
+
         for f in settings['source_folders']:
             self.process_source_folder(f)
-
-        #for f in settings['destination_folders']:
-        #    self.process_destination_folder(imap_conn, f)
 
         self.imap_conn.logout()
         return 0
