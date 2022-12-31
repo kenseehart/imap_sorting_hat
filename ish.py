@@ -27,13 +27,14 @@ import shelve
 import requests
 from hashlib import sha256
 import re
+from time import perf_counter
 
 import imapclient
 import numpy as np
 import openai
 import bs4
-import sklearn
-
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.model_selection import train_test_split
 
 logging.basicConfig(level=logging.INFO)
 
@@ -175,6 +176,7 @@ class ISH:
         self.hkey = b'BODY[HEADER.FIELDS (SUBJECT FROM TO CC BCC)]'
         self.bkey = b'BODY[]'
         self.max_chars = 16384
+        self.classifier: RandomForestClassifier = None
 
     @property
     def msgs_file(self) -> str:
@@ -243,15 +245,6 @@ class ISH:
 
         return True
 
-    def filter_text(self, text: str) -> str:
-        '''Filter text to remove unwanted content and make it more readable by openai'''
-
-        # remove mime headers
-
-        # use beautiful soup to remove html tags
-
-        return text
-
     def parse_mesg(self, mesg: dict) -> dict:
         '''Parse a raw message into a string'''
         header = mesg[self.hkey].decode('utf-8')
@@ -265,6 +258,9 @@ class ISH:
             m = re_header_item.match(item)
             if m:
                 header_dict[m.group(1)] = m.group(2)
+
+        # remove spam prefix because we want spam training data to be as similar as possible to non-spam training data
+        header_dict['Subject'] = header_dict.get('Subject', '').removeprefix('**SPAM**').strip()
 
         mesg_dict = {
             'from': [m.group(1) for m in re_address.finditer(header_dict['From'])],
@@ -343,34 +339,66 @@ class ISH:
 
         return dembd
 
-    def process_source_folder(self, folder:str):
-
+    def learn_folders(self, folders:List[str]) -> RandomForestClassifier:
         imap_conn = self.imap_conn
-        imap_conn.select_folder(folder)
+        embed_array = []
+        folder_array = []
 
-        # Retrieve the UIDs of all messages in the folder
-        uids = imap_conn.search(['ALL'])
-        msgs = self.get_msgs(uids[:20])
+        t0 = perf_counter()
 
-        # Print the subjects of all messages
-        for uid in uids[:20]:
-            content = msgs[uid]
-            print (content[:4096])
-            print ('-'*80)
+        for folder in folders:
+            imap_conn.select_folder(folder)
 
+            # Retrieve the UIDs of all messages in the folder
+            uids = imap_conn.search(['ALL'])
+            embd = self.get_embeddings(folder, uids[:20])
+            embed_array.extend(embd.values())
+            folder_array.extend([folder] * len(embd))
 
-    def process_destination_folder(self, folder:str):
+        t1 = perf_counter()
+        logging.info(f'Fetched {len(embed_array)} embeddings in {t1-t0:.2f} seconds')
+
+        # Train a classifier
+        X = np.array([embd['data'][0]['embedding'] for embd in embed_array])
+        y = np.array([folder for folder in folder_array])
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, random_state=0)
+
+        clf = RandomForestClassifier(n_estimators=100, random_state=0)
+        self.classifier = clf.fit(X_train, y_train)
+        accuracy = clf.score(X_test, y_test)
+        logging.info(f'Accuracy: {accuracy:.2f}')
+        logging.info(f'Classifier: {self.classifier}')
+
+        t2 = perf_counter()
+
+        logging.info(f'Trained classifier in {t2-t1:.2f} seconds')
+
+    def classify_messages(self, source_folders:List[str]) -> None:
         imap_conn = self.imap_conn
-        imap_conn.select_folder(folder)
+        classifier = self.classifier
 
-        # Retrieve the UIDs of all messages in the folder
-        uids = imap_conn.search(['ALL'])
-        msgs = self.get_msgs(folder, uids[:20])
-        embd = self.get_embeddings(folder, uids[:20])
+        for folder in source_folders:
+            imap_conn.select_folder(folder)
 
-        for uid in uids[:20]:
-            print (embd[uid])
-            print ('-'*80)
+            # Retrieve the UIDs of all messages in the folder
+            uids = imap_conn.search(['ALL'])
+            embd = self.get_embeddings(folder, uids[:40])
+            mesgs = self.get_msgs(folder, uids[:40])
+
+            for uid, embd in embd.items():
+                dest_folder = classifier.predict([embd['data'][0]['embedding']])[0]
+                proba = classifier.predict_proba([embd['data'][0]['embedding']])[0]
+                ranks = sorted(zip(proba, classifier.classes_), reverse=True)
+
+                print(f'\n{uid:3} From {mesgs[uid]["from"][0]}: {mesgs[uid]["body"][0:100]}')
+
+                for p, c in ranks:
+                    print(f'{p:.2f}: {c}')
+
+                logging.info(f'moved from {folder} to {dest_folder}: {uid}')
+                # imap_conn.move(uid, folder)
+
 
     def run(self, interactive:bool) -> int:
         if interactive:
@@ -387,11 +415,10 @@ class ISH:
         for f in settings['destination_folders']:
             logging.info(f'Destination folder: {f}')
 
-        for f in settings['destination_folders']:
-            self.process_destination_folder(f)
+        self.learn_folders(settings['destination_folders'])
 
-        for f in settings['source_folders']:
-            self.process_source_folder(f)
+        self.classify_messages(settings['source_folders'])
+
 
         self.imap_conn.logout()
         return 0
