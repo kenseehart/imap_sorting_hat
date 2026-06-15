@@ -1,10 +1,21 @@
-# imap_sorting_hat = "ish"
-Magically sort email into smart folders
+# fish (imap_sorting_hat)
 
-- No rule programming. Instead, just move a few emails into a smart folder and **ish** will quickly learn what the messages have in common.
-- Any folder can be labeled a smart folder.
-- Uses the lates OpenAI language model technology to quickly sort emails into corresponding folders.
-- Compatible with all imap email clients.
-- Works for all common languages.
+IMAP email sync, RAG, and MCP agent for multi-account mail.
 
-Status: Early development
+## Features
+
+- Sync 4 mailboxes (seehart, evolver, agi.green, gmail) via IMAP
+- One message = one RAG chunk in SQLite + sqlite-vec
+- Hybrid semantic + keyword search
+- Bulk archive/move/flag by natural-language query
+- Importance ranking, topic clusters, mind-map graph export
+- Compose and send via SMTP
+- FastMCP for Cursor; optional HTTP OAuth deploy for Claude mobile
+
+## Quick start
+
+See [AGENTS.md](AGENTS.md).
+
+## Status
+
+Replaces the 2022 `ish.py` prototype with a modern `uv` package under `src/fish/`.

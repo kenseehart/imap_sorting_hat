@@ -1,6 +1,6 @@
 # Agent onboarding — fish (IMAP email AI)
 
-> **Status**: Cloned at `/home/ken/fish`. GitHub: [kenseehart/imap_sorting_hat](https://github.com/kenseehart/imap_sorting_hat).
+> **Status**: Active at `/home/ken/fish`. GitHub: [kenseehart/imap_sorting_hat](https://github.com/kenseehart/imap_sorting_hat).
 
 ## Shared resources
 
@@ -8,26 +8,58 @@ Cross-project assets: **`/home/ken/shared`**. Workspace index: **`/home/ken/AGEN
 
 ## What this project is
 
-AI-powered email management across multiple IMAP accounts. Likely needs rewrite for FastMCP + modern Claude workflow.
+Multi-account IMAP email sync with RAG (1 message = 1 chunk), hybrid search, importance ranking, topic graphs, and a FastMCP server with full read/write mail operations.
 
 ## Repo
 
 - Path: **`/home/ken/fish`**
 - GitHub: [kenseehart/imap_sorting_hat](https://github.com/kenseehart/imap_sorting_hat)
 
-## Planned architecture
+## Architecture
 
-- FastMCP tools: list mailboxes, search, read, summarize, label/move
-- OAuth MCP deploy for Claude mobile (pattern: `tesla/`)
-- Optional chat UI: `shared/web/chat/` + backend handler
+- **Sync**: `imapclient` → SQLite (`~/.config/fish/fish.db`) + **sqlite-vec** embeddings
+- **Accounts**: `~/.config/fish/accounts.yaml` + encrypted app passwords in `secrets.json`
+- **MCP (local)**: `python -m fish.mcp_server` — registered as `fish` in `.cursor/mcp.json`
+- **MCP (remote)**: `python -m fish.http_server` — OAuth pattern from `tesla/` for Claude mobile
+- **Legacy**: `ish.py` retired; parsing logic lives in `src/fish/parse.py`
 
-## Quick start
+## Setup
 
 ```bash
 cd /home/ken/fish
-uv sync   # once pyproject exists
+uv sync
+uv run python -m util.mkdo_setup
+mkdo fish -d .venv/bin
+
+mkdir -p ~/.config/fish
+cp config/accounts.yaml.example ~/.config/fish/accounts.yaml
+cp .env.example ~/.config/fish/fish.env   # OpenAI key only
+fish connect <email>                      # stores app password encrypted per account
 ```
 
-## MCP target
+## Commands
 
-Register as `fish` in `.cursor/mcp.json` when `fish/mcp_server.py` exists.
+| Command | Purpose |
+|---------|---------|
+| `fish connect <email>` | Interactive IMAP/SMTP setup for one account |
+| `fish status` | Check config, IMAP connectivity, DB counts |
+| `fish sync` | Sync last 90 days from all accounts |
+| `fish backfill --since 2020-01-01` | Historical mail backfill |
+
+## MCP tools
+
+Read: `fish_search`, `fish_message_get`, `fish_thread_get`, `fish_sync_status`, `fish_priority_inbox`, `fish_digest`, `fish_topics_*`, `fish_topic_graph`
+
+Write: `fish_sync_run`, `fish_message_move`, `fish_message_archive`, `fish_bulk_action`, `fish_compose`, `fish_send`
+
+All tools are `autoApprove` in Cursor — agent can archive/move/send without prompts.
+
+## Config paths
+
+| File | Purpose |
+|------|---------|
+| `~/.config/fish/accounts.yaml` | IMAP/SMTP hosts per mailbox |
+| `~/.config/fish/secrets.json` | Encrypted app passwords (via `fish connect`) |
+| `~/.config/fish/fish.env` | OpenAI API key |
+| `~/.config/fish/fish.db` | Messages + vectors |
+| `~/.config/fish/actions.log` | Bulk action audit log |

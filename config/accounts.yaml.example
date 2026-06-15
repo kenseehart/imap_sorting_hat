@@ -1,0 +1,35 @@
+# Copy to ~/.config/fish/accounts.yaml
+# App passwords: run `fish connect <email>` (stored encrypted in ~/.config/fish/secrets.json)
+accounts:
+  - email: ken@seehart.com
+    imap_host: mail.seehart.com
+    smtp_host: mail.seehart.com
+    username: ken@seehart.com
+    archive_folder: Archive
+
+  - email: ken@evolver.ai
+    imap_host: mail.evolver.ai
+    smtp_host: mail.evolver.ai
+    username: ken@evolver.ai
+    archive_folder: Archive
+
+  - email: ken@agi.green
+    imap_host: mail.agi.green
+    smtp_host: mail.agi.green
+    username: ken@agi.green
+    archive_folder: Archive
+
+  - email: kenseehart@gmail.com
+    imap_host: imap.gmail.com
+    imap_port: 993
+    smtp_host: smtp.gmail.com
+    smtp_port: 587
+    username: kenseehart@gmail.com
+    archive_folder: "[Gmail]/All Mail"
+
+# Folders to skip during sync (provider-specific)
+ignore_folders:
+  - "[Gmail]/Trash"
+  - "[Gmail]/Spam"
+  - "Junk"
+  - "Trash"

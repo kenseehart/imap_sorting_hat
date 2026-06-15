@@ -1,0 +1,33 @@
+[project]
+name = "fish"
+version = "0.1.0"
+description = "IMAP email sync, RAG, and MCP agent for multi-account mail"
+requires-python = ">=3.10"
+dependencies = [
+    "cryptography>=42.0.0",
+    "fastmcp>=2.0.0",
+    "imapclient>=3.0.0",
+    "mcp>=1.0.0",
+    "numpy>=1.26.0",
+    "openai>=1.0.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0.0",
+    "scikit-learn>=1.4.0",
+    "sqlite-vec>=0.1.0",
+    "tqdm>=4.66.0",
+    "cmdline",
+    "ken-mcp",
+    "util",
+]
+
+[tool.uv.sources]
+cmdline = { path = "../shared/cmdline", editable = true }
+ken-mcp = { path = "../shared/mcp", editable = true }
+util = { path = "../util", editable = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fish"]
