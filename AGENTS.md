@@ -1,10 +1,10 @@
 # Agent onboarding — fish (IMAP email AI)
 
-> **Status**: Active at `/home/ken/fish`. GitHub: [kenseehart/imap_sorting_hat](https://github.com/kenseehart/imap_sorting_hat).
+> **Status**: Active at `/home/ken/ws/fish`. GitHub: [kenseehart/imap_sorting_hat](https://github.com/kenseehart/imap_sorting_hat).
 
 ## Shared resources
 
-Cross-project assets: **`/home/ken/shared`**. Workspace index: **`/home/ken/AGENTS.md`**.
+Cross-project assets: **`/home/ken/ws/shared`**. Workspace index: **`/home/ken/ws/AGENTS.md`**.
 
 ## What this project is
 
@@ -12,13 +12,13 @@ Multi-account IMAP email sync with RAG (1 message = 1 chunk), hybrid search, imp
 
 ## Repo
 
-- Path: **`/home/ken/fish`**
+- Path: **`/home/ken/ws/fish`**
 - GitHub: [kenseehart/imap_sorting_hat](https://github.com/kenseehart/imap_sorting_hat)
 
 ## Architecture
 
 - **Sync**: `imapclient` → SQLite (`~/.config/fish/fish.db`) + **sqlite-vec** embeddings
-- **Accounts**: `~/.config/fish/accounts.yaml` + encrypted app passwords in `secrets.json`
+- **Accounts**: `~/.config/fish/accounts.yaml` (hosts, usernames, app passwords)
 - **MCP (local)**: `python -m fish.mcp_server` — registered as `fish` in `.cursor/mcp.json`
 - **MCP (remote)**: `python -m fish.http_server` — OAuth pattern from `tesla/` for Claude mobile
 - **Legacy**: `ish.py` retired; parsing logic lives in `src/fish/parse.py`
@@ -26,7 +26,7 @@ Multi-account IMAP email sync with RAG (1 message = 1 chunk), hybrid search, imp
 ## Setup
 
 ```bash
-cd /home/ken/fish
+cd /home/ken/ws/fish
 uv sync
 uv run python -m util.mkdo_setup
 mkdo fish -d .venv/bin
@@ -42,6 +42,7 @@ fish connect <email>                      # stores app password encrypted per ac
 | Command | Purpose |
 |---------|---------|
 | `fish connect <email>` | Interactive IMAP/SMTP setup for one account |
+| `fish search <query>` | Hybrid semantic + keyword search (`--limit`, `--account`, `--json`) |
 | `fish status` | Check config, IMAP connectivity, DB counts |
 | `fish sync` | Sync last 90 days from all accounts |
 | `fish backfill --since 2020-01-01` | Historical mail backfill |
@@ -58,8 +59,7 @@ All tools are `autoApprove` in Cursor — agent can archive/move/send without pr
 
 | File | Purpose |
 |------|---------|
-| `~/.config/fish/accounts.yaml` | IMAP/SMTP hosts per mailbox |
-| `~/.config/fish/secrets.json` | Encrypted app passwords (via `fish connect`) |
+| `~/.config/fish/accounts.yaml` | IMAP/SMTP hosts and app passwords per mailbox |
 | `~/.config/fish/fish.env` | OpenAI API key |
 | `~/.config/fish/fish.db` | Messages + vectors |
 | `~/.config/fish/actions.log` | Bulk action audit log |

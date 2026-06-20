@@ -1,44 +1,18 @@
 # Remote MCP deploy (Claude mobile)
 
-Pattern matches `tesla/` — OAuth + streamable-http on my.hosting.com.
+**Training** (heavy) uses `compute` — see `fish/compute.yaml` (`daime-prism` RunPod pod: L4, 86 GB RAM, `/workspace` on volume `daime_prism_volume`, ~$0.39/hr).
 
-## Env vars (`~/.config/fish/fish.env`)
-
-```
-FISH_MCP_BASE_URL=https://your-domain.com/fish
-FISH_MCP_CLIENT_ID=fish-mcp
-FISH_MCP_CLIENT_SECRET=change-me
-FISH_MCP_HOST=0.0.0.0
-FISH_MCP_PORT=8753
-```
-
-## Run
+Bind the live pod after IP/port changes (RunPod console → **SSH over exposed TCP**):
 
 ```bash
-cd /home/ken/fish
-source .venv/bin/activate
-python -m fish.http_server
+compute bind daime-prism --ssh root@66.92.198.138:11405 \
+  --proxy-user lutibaqqa6gnbi-64411dc8 --identity ~/.ssh/id_ed25519_personal
+compute ssh daime-prism
+compute tunnel daime-prism --port 8888   # Jupyter Lab
 ```
-
-## systemd (on hosting)
-
-```ini
-[Unit]
-Description=Fish MCP HTTP
-After=network.target
-
-[Service]
-WorkingDirectory=/home/ken/fish
-EnvironmentFile=/home/ken/.config/fish/fish.env
-ExecStart=/home/ken/fish/.venv/bin/python -m fish.http_server
-Restart=on-failure
-
-[Install]
-WantedBy=multi-user.target
-```
-
-nginx: reverse-proxy `/fish` → `localhost:8753`.
 
 ## Claude.ai connector
+
+**Deferred** until `host/docs/hosting-python.md` experiment confirms URL + OAuth.
 
 Use Advanced Settings with `FISH_MCP_CLIENT_ID` and `FISH_MCP_CLIENT_SECRET`.

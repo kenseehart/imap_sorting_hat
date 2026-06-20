@@ -1,3 +1,5 @@
+"""Legacy encrypted store — read-only migration into accounts.yaml."""
+
 from __future__ import annotations
 
 import json

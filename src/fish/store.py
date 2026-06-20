@@ -264,15 +264,20 @@ def messages_needing_embedding(db: sqlite3.Connection, limit: int = 100) -> list
 def vector_search(
     db: sqlite3.Connection, query_embedding: list[float], limit: int = 20
 ) -> list[tuple[int, float]]:
+    k = int(limit)
+    if k <= 0:
+        raise ValueError(f"vector_search limit must be positive, got {limit!r}")
+    # sqlite-vec vec0 KNN requires `k = ?` in the WHERE clause. Plain `LIMIT ?`
+    # fails on SQLite < 3.41 (system python here is 3.37.x).
     rows = db.execute(
         """
         SELECT rowid, distance
         FROM message_vec
         WHERE embedding MATCH ?
+          AND k = ?
         ORDER BY distance
-        LIMIT ?
         """,
-        (serialize_float32(query_embedding), limit),
+        (serialize_float32(query_embedding), k),
     ).fetchall()
     return [(int(r[0]), float(r[1])) for r in rows]
 

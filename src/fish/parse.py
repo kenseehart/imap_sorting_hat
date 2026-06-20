@@ -11,7 +11,7 @@ from typing import Any
 
 import bs4
 
-from fish.config import MAX_EMBED_CHARS
+from fish.config import MAX_EMBED_BODY_CHARS
 
 re_header_item = re.compile(r"([\w-]+): (.*)")
 re_address = re.compile(r"([a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+)")
@@ -99,7 +99,7 @@ def parse_raw_message(
     to_display = ", ".join(to_addrs + cc_addrs)
     body_for_embed = (
         f"From: {from_display}. To: {to_display}. Subject: {subject}. {body_text}"
-    )[:MAX_EMBED_CHARS]
+    )[:MAX_EMBED_BODY_CHARS]
     content_hash = sha256(body_for_embed.encode("utf-8")).hexdigest()[:16]
 
     return ParsedMessage(

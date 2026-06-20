@@ -29,9 +29,14 @@ def send_email(
     msg.set_content(body)
 
     recipients = list(to_addrs) + list(cc_addrs or [])
-    with smtplib.SMTP(account.smtp_host, account.smtp_port) as smtp:
-        smtp.starttls()
-        smtp.login(account.username, account.password)
-        smtp.send_message(msg)
+    if account.smtp_port == 465:
+        with smtplib.SMTP_SSL(account.smtp_host, account.smtp_port) as smtp:
+            smtp.login(account.username, account.password)
+            smtp.send_message(msg)
+    else:
+        with smtplib.SMTP(account.smtp_host, account.smtp_port) as smtp:
+            smtp.starttls()
+            smtp.login(account.username, account.password)
+            smtp.send_message(msg)
 
     return msg.as_string()

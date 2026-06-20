@@ -1,0 +1,4 @@
+resource: daime-prism
+repo: ~/ws/fish
+sync_paths:
+  - ~/.config/fish/models/

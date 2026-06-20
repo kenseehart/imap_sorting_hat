@@ -3,8 +3,8 @@ from __future__ import annotations
 import logging
 from datetime import date
 
+from cmdline.progress import progress_bar, progress_session, progress_write
 from openai import AuthenticationError
-from tqdm import tqdm
 
 from fish.accounts import Account, ignore_folders, load_accounts
 from fish.config import DEFAULT_SYNC_DAYS, ensure_openai_api_key
@@ -51,7 +51,7 @@ def embed_pending(batch_size: int = EMBED_BATCH, *, auth_retry: bool = True) -> 
     except AuthenticationError:
         if not auth_retry:
             raise
-        tqdm.write("OpenAI API key rejected — please re-enter.")
+        progress_write("OpenAI API key rejected — please re-enter.")
         reset_client()
         ensure_openai_api_key(interactive=True, force=True)
         return embed_pending(batch_size=batch_size, auth_retry=False)
@@ -66,7 +66,7 @@ def embed_all_pending(*, show_progress: bool = True) -> int:
         return 0
 
     embedded = 0
-    bar = tqdm(
+    bar = progress_bar(
         total=total,
         desc="embedding",
         unit="msg",
@@ -109,7 +109,7 @@ def _sync_one_folder(
             lambda c: folder_uidvalidity(c, folder), folder=folder
         )
 
-        msg_bar = tqdm(
+        msg_bar = progress_bar(
             total=len(uids),
             desc=f"  {folder[:32]}",
             unit="msg",
@@ -170,7 +170,7 @@ def sync_account(
     try:
         all_folders = folders or list_folders(account)
     except Exception as exc:
-        tqdm.write(f"ERROR {account.email}: cannot list folders — {short_imap_error(exc)}")
+        progress_write(f"ERROR {account.email}: cannot list folders — {short_imap_error(exc)}")
         stats["error"] = str(exc)
         return stats
 
@@ -187,7 +187,7 @@ def sync_account(
             account.archive_folder,
         )
 
-    folder_bar = tqdm(
+    folder_bar = progress_bar(
         target_folders,
         desc=account.email,
         unit="folder",
@@ -211,7 +211,7 @@ def sync_account(
         except Exception as exc:
             err = short_imap_error(exc)
             logger.warning("Sync failed for %s %s: %s", account.email, folder, err)
-            tqdm.write(f"WARN {account.email} / {folder}: {err}")
+            progress_write(f"WARN {account.email} / {folder}: {err}")
             stats["folders"][folder] = {"error": err}
 
     stats["embedded"] = embed_all_pending(show_progress=show_progress)
@@ -222,19 +222,26 @@ def sync_all(
     days: int = DEFAULT_SYNC_DAYS,
     since: date | None = None,
     *,
+    account: str | None = None,
     show_progress: bool = True,
 ) -> list[dict]:
     results = []
     accounts = load_accounts()
-    account_bar = tqdm(
-        accounts,
-        desc="accounts",
-        unit="acct",
-        disable=not show_progress or not accounts,
-    )
-    for account in account_bar:
-        account_bar.set_postfix_str(account.email, refresh=False)
-        results.append(
-            sync_account(account, days=days, since=since, show_progress=show_progress)
+    if account:
+        accounts = [a for a in accounts if a.email.lower() == account.lower()]
+        if not accounts:
+            raise ValueError(f"No matching account: {account}")
+
+    with progress_session(disable=not show_progress):
+        account_bar = progress_bar(
+            accounts,
+            desc="accounts",
+            unit="acct",
+            disable=not show_progress or not accounts,
         )
+        for acct in account_bar:
+            account_bar.set_postfix_str(acct.email, refresh=False)
+            results.append(
+                sync_account(acct, days=days, since=since, show_progress=show_progress)
+            )
     return results

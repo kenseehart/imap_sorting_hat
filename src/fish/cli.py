@@ -9,6 +9,7 @@ from cmdline import cmd, create_parser, emit_output, json_dumps, optarg, run_cli
 
 from fish.config import DEFAULT_SYNC_DAYS, ensure_openai_api_key, load_env
 from fish.connect import connect_interactive
+from fish.search import search_messages
 from fish.store import db_conn, init_db, sync_status
 from fish.sync import sync_all, sync_account
 
@@ -45,12 +46,18 @@ def status(*, json_output: bool = False, md_output: bool = False) -> int:
 
 @cmd
 def sync(
+    email: str | None = optarg(
+        None,
+        positional=True,
+        metavar="EMAIL",
+        help="Account email to sync (default: all)",
+    ),
     days: int = optarg(DEFAULT_SYNC_DAYS, long_flag="--days", help="Sync window in days"),
     no_progress: bool = optarg(
         False, long_flag="--no-progress", action="store_true", help="Disable progress bars"
     ),
 ) -> int:
-    """Sync mail from all configured accounts into the local RAG database."""
+    """Sync mail from configured accounts into the local RAG database."""
     load_env()
     try:
         ensure_openai_api_key(interactive=True)
@@ -58,7 +65,11 @@ def sync(
         print(exc, file=sys.stderr)
         return 1
     init_db()
-    results = sync_all(days=days, show_progress=not no_progress)
+    try:
+        results = sync_all(days=days, account=email, show_progress=not no_progress)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
     exit_code = 0
     for result in results:
         if result.get("folders") and any("error" in v for v in result["folders"].values() if isinstance(v, dict)):
@@ -68,6 +79,59 @@ def sync(
             f"new/changed={result['new_or_changed']} embedded={result['embedded']}"
         )
     return exit_code
+
+
+@cmd(output=True)
+def search(
+    query: str,
+    account: str | None = optarg(None, long_flag="--account", help="Limit to one account email"),
+    folder: str | None = optarg(None, long_flag="--folder", help="Limit to one IMAP folder"),
+    unread_only: bool = optarg(
+        False, long_flag="--unread", action="store_true", help="Unread messages only"
+    ),
+    limit: int = optarg(20, long_flag="--limit", help="Max results (use 100+ for exhaustive topic search)"),
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """Hybrid semantic + keyword search over synced messages."""
+    load_env()
+    try:
+        ensure_openai_api_key(interactive=False)
+    except RuntimeError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    try:
+        results = search_messages(
+            query,
+            account_email=account,
+            folder=folder,
+            unread_only=unread_only,
+            limit=limit,
+        )
+    except Exception as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    if json_output:
+        emit_output(results, json_output=True)
+    else:
+        rows = [
+            {
+                "id": r["id"],
+                "score": r.get("score"),
+                "date": (r.get("date") or "")[:10],
+                "account": r.get("account_email"),
+                "subject": (r.get("subject") or "")[:100],
+            }
+            for r in results
+        ]
+        emit_output(
+            rows,
+            json_output=False,
+            md=md_output,
+            title=f'Fish search: "{query}" ({len(results)} results)',
+        )
+    return 0
 
 
 @cmd

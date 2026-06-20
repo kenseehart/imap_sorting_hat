@@ -7,17 +7,15 @@ import smtplib
 import socket
 import sys
 
-import yaml
-
 from fish.accounts import (
     ACCOUNTS_PATH,
     Account,
-    ensure_accounts_file,
     load_accounts_config,
+    resolve_password,
+    save_account_entry,
 )
 from fish.config import ensure_config_dir
 from fish.imap_client import test_connection
-from fish.secrets import get_password, has_password, set_password
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
 
@@ -32,7 +30,7 @@ def suggest_hosts(email: str) -> dict[str, str | int]:
             "imap_host": "imap.gmail.com",
             "smtp_host": "smtp.gmail.com",
             "imap_port": 993,
-            "smtp_port": 587,
+            "smtp_port": 465,
             "archive_folder": GMAIL_ARCHIVE,
         }
     mail_host = f"mail.{domain}"
@@ -40,7 +38,7 @@ def suggest_hosts(email: str) -> dict[str, str | int]:
         "imap_host": mail_host,
         "smtp_host": mail_host,
         "imap_port": 993,
-        "smtp_port": 587,
+        "smtp_port": 465,
         "archive_folder": DEFAULT_ARCHIVE,
     }
 
@@ -68,24 +66,14 @@ def _prompt_int(label: str, default: int) -> int:
             print(f"  Enter a number (default {default}).")
 
 
-def _save_account_yaml(entry: dict) -> None:
-    ensure_accounts_file()
-    data = load_accounts_config()
-    accounts = data.get("accounts", [])
-    entry = dict(entry)
-    entry.pop("password_env", None)
-    replaced = False
-    for i, existing in enumerate(accounts):
-        if existing.get("email", "").lower() == entry["email"].lower():
-            merged = {**existing, **entry}
-            merged.pop("password_env", None)
-            accounts[i] = merged
-            replaced = True
-            break
-    if not replaced:
-        accounts.append(entry)
-    data["accounts"] = accounts
-    ACCOUNTS_PATH.write_text(yaml.safe_dump(data, sort_keys=False, default_flow_style=False))
+def _is_auth_failure(error: str) -> bool:
+    low = error.lower()
+    return (
+        "authentication failed" in low
+        or "authenticationfailed" in low
+        or "invalid credentials" in low
+        or "authorization failed" in low
+    )
 
 
 def _diagnose_imap_error(exc: Exception, host: str, port: int) -> str:
@@ -98,7 +86,7 @@ def _diagnose_imap_error(exc: Exception, host: str, port: int) -> str:
         return f"Connection to {host}:{port} timed out. Firewall or wrong host/port?"
     if isinstance(exc, imaplib.IMAP4.error):
         msg = str(exc)
-        if "authentication failed" in msg.lower() or "invalid credentials" in msg.lower():
+        if _is_auth_failure(msg):
             return (
                 "IMAP authentication failed.\n"
                 "  • Use an app password (not your regular login password) if 2FA is on.\n"
@@ -113,10 +101,14 @@ def _diagnose_imap_error(exc: Exception, host: str, port: int) -> str:
 
 def _test_smtp(host: str, port: int, username: str, password: str) -> dict:
     try:
-        with smtplib.SMTP(host, port, timeout=20) as smtp:
-            smtp.ehlo()
-            smtp.starttls()
-            smtp.login(username, password)
+        if port == 465:
+            with smtplib.SMTP_SSL(host, port, timeout=20) as smtp:
+                smtp.login(username, password)
+        else:
+            with smtplib.SMTP(host, port, timeout=20) as smtp:
+                smtp.ehlo()
+                smtp.starttls()
+                smtp.login(username, password)
         return {"ok": True}
     except smtplib.SMTPAuthenticationError as exc:
         return {
@@ -125,6 +117,62 @@ def _test_smtp(host: str, port: int, username: str, password: str) -> dict:
         }
     except Exception as exc:
         return {"ok": False, "error": _diagnose_imap_error(exc, host, port)}
+
+
+def _prompt_app_password(email: str, existing: dict | None, *, retry: bool) -> str:
+    legacy_env = existing.get("password_env") if existing else None
+    stored = existing.get("password") if existing else None
+    existing_pwd = resolve_password(email, stored, legacy_env)
+    if retry:
+        print("Authentication failed — enter app password again (Ctrl+C to abort).")
+        return _prompt("App password", secret=True)
+    if existing_pwd:
+        use_existing = input("App password already stored for this account. Replace it? [y/N]: ").strip().lower()
+        if use_existing != "y":
+            return existing_pwd
+    else:
+        print("Enter an app-specific password (input hidden).")
+    return _prompt("App password", secret=True)
+
+
+def _test_imap_with_retry(probe: Account, host: str, port: int) -> tuple[bool, str | None]:
+    """Return (ok, error_message). Re-prompt password on auth failure until success or interrupt."""
+    while True:
+        print(f"\nTesting IMAP {host}:{port} as {probe.username}...")
+        try:
+            result = test_connection(probe)
+        except Exception as exc:
+            err = _diagnose_imap_error(exc, host, port)
+            if _is_auth_failure(err):
+                print(err, file=sys.stderr)
+                probe._password_override = _prompt_app_password(probe.email, None, retry=True)
+                continue
+            print(err, file=sys.stderr)
+            return False, err
+
+        if result.get("ok"):
+            folder_count = result.get("folder_count", 0)
+            print(f"  IMAP OK — {folder_count} folders visible.")
+            sample = result.get("folders") or []
+            if sample:
+                print("  Sample folders:", ", ".join(sample[:5]) + ("…" if len(sample) > 5 else ""))
+            return True, None
+
+        err = result.get("error", "unknown error")
+        if _is_auth_failure(err):
+            print(f"IMAP connection failed.\n  {err}", file=sys.stderr)
+            probe._password_override = _prompt_app_password(probe.email, None, retry=True)
+            continue
+
+        print(f"IMAP connection failed.\n  {err}", file=sys.stderr)
+        print(
+            "\nTips:\n"
+            "  • Confirm IMAP is enabled in your mail provider settings.\n"
+            "  • Double-check host, port (993 SSL), and app password.\n"
+            "  • For custom domains, try the host from your hosting control panel.",
+            file=sys.stderr,
+        )
+        return False, err
 
 
 def connect_interactive(email: str) -> int:
@@ -160,23 +208,11 @@ def connect_interactive(email: str) -> int:
         existing.get("archive_folder", defaults["archive_folder"]) if existing else str(defaults["archive_folder"]),
     )
 
-    legacy_env = existing.get("password_env") if existing else None
-    existing_pwd = get_password(email, legacy_env=legacy_env, migrate=False)
-    if existing_pwd:
-        use_existing = input("App password already stored for this account. Replace it? [y/N]: ").strip().lower()
-        if use_existing != "y":
-            password = existing_pwd
-        else:
-            password = _prompt("App password", secret=True)
-    else:
-        print("Enter an app-specific password (input hidden).")
-        password = _prompt("App password", secret=True)
-
+    password = _prompt_app_password(email, existing, retry=False)
     if not password:
         print("No password provided.", file=sys.stderr)
         return 1
 
-    print(f"\nTesting IMAP {imap_host}:{imap_port} as {username}...")
     probe = Account(
         id=None,
         email=email,
@@ -188,53 +224,45 @@ def connect_interactive(email: str) -> int:
         smtp_port=smtp_port,
         _password_override=password,
     )
-    try:
-        result = test_connection(probe)
-    except Exception as exc:
-        print(_diagnose_imap_error(exc, imap_host, imap_port), file=sys.stderr)
+    ok, _ = _test_imap_with_retry(probe, imap_host, imap_port)
+    if not ok:
         return 1
-
-    if not result.get("ok"):
-        err = result.get("error", "unknown error")
-        print(f"IMAP connection failed.\n  {err}", file=sys.stderr)
-        print(
-            "\nTips:\n"
-            "  • Confirm IMAP is enabled in your mail provider settings.\n"
-            "  • Double-check host, port (993 SSL), and app password.\n"
-            "  • For custom domains, try the host from your hosting control panel.",
-            file=sys.stderr,
-        )
-        return 1
-
-    folder_count = result.get("folder_count", 0)
-    print(f"  IMAP OK — {folder_count} folders visible.")
-    sample = result.get("folders") or []
-    if sample:
-        print("  Sample folders:", ", ".join(sample[:5]) + ("…" if len(sample) > 5 else ""))
+    password = probe._password_override or password
 
     print(f"\nTesting SMTP {smtp_host}:{smtp_port}...")
     smtp_result = _test_smtp(smtp_host, smtp_port, username, password)
     if smtp_result.get("ok"):
         print("  SMTP OK.")
+    elif _is_auth_failure(smtp_result.get("error", "")):
+        while True:
+            print(f"  SMTP auth failed: {smtp_result.get('error')}", file=sys.stderr)
+            password = _prompt_app_password(email, None, retry=True)
+            smtp_result = _test_smtp(smtp_host, smtp_port, username, password)
+            if smtp_result.get("ok"):
+                print("  SMTP OK.")
+                break
     else:
         print(f"  SMTP warning: {smtp_result.get('error')}")
         cont = input("Save account anyway without verified SMTP? [y/N]: ").strip().lower()
         if cont != "y":
             return 1
 
-    entry = {
-        "email": email,
-        "imap_host": imap_host,
-        "imap_port": imap_port,
-        "smtp_host": smtp_host,
-        "smtp_port": smtp_port,
-        "username": username,
-        "archive_folder": archive_folder,
-    }
-    _save_account_yaml(entry)
-    set_password(email, password)
+    save_account_entry(
+        {
+            "email": email,
+            "imap_host": imap_host,
+            "imap_port": imap_port,
+            "smtp_host": smtp_host,
+            "smtp_port": smtp_port,
+            "username": username,
+            "archive_folder": archive_folder,
+            "password": password,
+        }
+    )
+    from fish.secrets import delete_password
+
+    delete_password(email)
     ensure_config_dir()
-    print(f"\nSaved account to {ACCOUNTS_PATH}")
-    print("Saved app password to ~/.config/fish/secrets.json (encrypted)")
+    print(f"\nSaved account and app password to {ACCOUNTS_PATH}")
     print("Run `fish status` to verify all accounts, then `fish sync` to pull mail.")
     return 0

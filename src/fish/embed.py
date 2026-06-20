@@ -1,9 +1,12 @@
 from __future__ import annotations
 
-from fish.config import MAX_EMBED_CHARS, embedding_model, openai_api_key
+import tiktoken
 from openai import AuthenticationError, OpenAI
 
+from fish.config import MAX_EMBED_TOKENS, embedding_model, openai_api_key
+
 _client: OpenAI | None = None
+_encoding: tiktoken.Encoding | None = None
 
 
 def reset_client() -> None:
@@ -18,8 +21,19 @@ def get_client() -> OpenAI:
     return _client
 
 
-def truncate_for_embed(text: str) -> str:
-    return text[:MAX_EMBED_CHARS]
+def _get_encoding() -> tiktoken.Encoding:
+    global _encoding
+    if _encoding is None:
+        _encoding = tiktoken.get_encoding("cl100k_base")
+    return _encoding
+
+
+def truncate_for_embed(text: str, *, max_tokens: int | None = None) -> str:
+    limit = max_tokens if max_tokens is not None else MAX_EMBED_TOKENS
+    tokens = _get_encoding().encode(text)
+    if len(tokens) <= limit:
+        return text
+    return _get_encoding().decode(tokens[:limit])
 
 
 def embed_text(text: str) -> list[float]:
