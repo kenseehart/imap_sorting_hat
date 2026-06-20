@@ -4,7 +4,7 @@ IMAP email sync, RAG, and MCP agent for multi-account mail.
 
 ## Features
 
-- Sync 4 mailboxes (seehart, evolver, agi.green, gmail) via IMAP
+- Sync 3 mailboxes (seehart, agi.green, gmail) via IMAP
 - One message = one RAG chunk in SQLite + sqlite-vec
 - Hybrid semantic + keyword search
 - Bulk archive/move/flag by natural-language query

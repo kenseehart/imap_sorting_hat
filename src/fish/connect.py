@@ -22,6 +22,9 @@ EMAIL_RE = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
 GMAIL_ARCHIVE = "[Gmail]/All Mail"
 DEFAULT_ARCHIVE = "Archive"
 
+M365_IMAP = "outlook.office365.com"
+M365_SMTP = "smtp.office365.com"
+
 
 def suggest_hosts(email: str) -> dict[str, str | int]:
     domain = email.split("@", 1)[1].lower()
@@ -32,6 +35,22 @@ def suggest_hosts(email: str) -> dict[str, str | int]:
             "imap_port": 993,
             "smtp_port": 465,
             "archive_folder": GMAIL_ARCHIVE,
+        }
+    if domain == "evolver.ai":
+        return {
+            "imap_host": M365_IMAP,
+            "smtp_host": M365_SMTP,
+            "imap_port": 993,
+            "smtp_port": 587,
+            "archive_folder": "Archive",
+        }
+    if domain in {"outlook.com", "hotmail.com", "live.com"} or domain.endswith(".onmicrosoft.com"):
+        return {
+            "imap_host": M365_IMAP,
+            "smtp_host": M365_SMTP,
+            "imap_port": 993,
+            "smtp_port": 587,
+            "archive_folder": "Archive",
         }
     mail_host = f"mail.{domain}"
     return {
@@ -70,6 +89,7 @@ def _is_auth_failure(error: str) -> bool:
     low = error.lower()
     return (
         "authentication failed" in low
+        or "authenticate failed" in low
         or "authenticationfailed" in low
         or "invalid credentials" in low
         or "authorization failed" in low
@@ -91,6 +111,11 @@ def _diagnose_imap_error(exc: Exception, host: str, port: int) -> str:
                 "IMAP authentication failed.\n"
                 "  • Use an app password (not your regular login password) if 2FA is on.\n"
                 "  • For Gmail: Google Account → Security → App passwords.\n"
+                "  • For Microsoft 365 / Outlook: enable IMAP in Outlook settings, then create an\n"
+                "    app password at https://account.microsoft.com/security (if your org allows it).\n"
+                "    Many M365 tenants disable basic auth — if app passwords fail, OAuth is required\n"
+                "    (fish connect --oauth for M365, coming soon).\n"
+                "    IMAP host is usually outlook.office365.com — not mail.yourdomain.com.\n"
                 f"  Server said: {msg}"
             )
         return f"IMAP error from {host}: {msg}"
@@ -193,6 +218,11 @@ def connect_interactive(email: str) -> int:
         print(f"  Found existing entry in {ACCOUNTS_PATH} — values below are pre-filled.")
 
     imap_host = _prompt("IMAP host", existing.get("imap_host", defaults["imap_host"]) if existing else str(defaults["imap_host"]))
+    if email.endswith("@evolver.ai") and imap_host == f"mail.{email.split('@', 1)[1]}":
+        print(
+            "  Tip: evolver.ai mail is often on Microsoft 365. If mail.evolver.ai times out,\n"
+            "  try IMAP host outlook.office365.com with an app password."
+        )
     imap_port = _prompt_int(
         "IMAP port",
         int(existing.get("imap_port", defaults["imap_port"]) if existing else defaults["imap_port"]),

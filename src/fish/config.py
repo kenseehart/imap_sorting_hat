@@ -27,6 +27,23 @@ SKIP_FOLDER_PATTERNS = (
     "Trash",
 )
 
+# Recommended starting point for ~/.config/fish/accounts.yaml ignore_folders.
+# Gmail: sync only [Gmail]/All Mail; ignore INBOX and other label mirrors.
+RECOMMENDED_IGNORE_FOLDERS = (
+    "INBOX",
+    "Drafts",
+    "[Gmail]/Sent Mail",
+    "[Gmail]/Important",
+    "[Gmail]/Starred",
+    "[Gmail]/Drafts",
+    "[Gmail]/Trash",
+    "[Gmail]/Spam",
+    "Junk",
+    "Trash",
+    "INBOX.spam",
+    "INBOX.Trash",
+)
+
 
 def ensure_config_dir() -> Path:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)

@@ -128,6 +128,9 @@ def db_conn() -> Iterator[sqlite3.Connection]:
 def init_db() -> None:
     with db_conn() as db:
         db.executescript(SCHEMA)
+        cols = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
+        if "gmail_labels" not in cols:
+            db.execute("ALTER TABLE messages ADD COLUMN gmail_labels TEXT")
         row = db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='message_vec'"
         ).fetchone()
@@ -192,8 +195,9 @@ def upsert_message(
         """
         INSERT INTO messages (
             account_id, folder, uid, message_id, in_reply_to, subject, from_addr,
-            to_addrs, cc_addrs, date, flags, body_text, body_for_embed, content_hash
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            to_addrs, cc_addrs, date, flags, body_text, body_for_embed, content_hash,
+            gmail_labels
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(account_id, folder, uid) DO UPDATE SET
             message_id=excluded.message_id,
             in_reply_to=excluded.in_reply_to,
@@ -206,6 +210,7 @@ def upsert_message(
             body_text=excluded.body_text,
             body_for_embed=excluded.body_for_embed,
             content_hash=excluded.content_hash,
+            gmail_labels=excluded.gmail_labels,
             embedded_at=NULL
         """,
         (
@@ -223,6 +228,7 @@ def upsert_message(
             parsed.body_text,
             parsed.body_for_embed,
             parsed.content_hash,
+            json.dumps(parsed.gmail_labels) if parsed.gmail_labels else None,
         ),
     )
     row = get_message_by_uid(db, account_id, folder, uid)

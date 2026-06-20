@@ -46,6 +46,9 @@ fish connect <email>                      # stores app password encrypted per ac
 | `fish status` | Check config, IMAP connectivity, DB counts |
 | `fish sync` | Sync last 90 days from all accounts |
 | `fish backfill --since 2020-01-01` | Historical mail backfill |
+| `fish ignore` | List folders skipped during sync |
+| `fish ignore --add FOLDER` | Add folder to ignore list |
+| `fish folders [EMAIL]` | List IMAP folders and sync/ignore status |
 
 ## MCP tools
 

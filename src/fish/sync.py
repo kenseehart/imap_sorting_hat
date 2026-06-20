@@ -6,7 +6,7 @@ from datetime import date
 from cmdline.progress import progress_bar, progress_session, progress_write
 from openai import AuthenticationError
 
-from fish.accounts import Account, ignore_folders, load_accounts
+from fish.accounts import Account, ignore_folders_for_account, load_accounts
 from fish.config import DEFAULT_SYNC_DAYS, ensure_openai_api_key
 from fish.embed import embed_texts, reset_client
 from fish.imap_client import (
@@ -18,7 +18,7 @@ from fish.imap_client import (
     search_uids_since_date,
     short_imap_error,
 )
-from fish.parse import parse_raw_message
+from fish.parse import parse_fetched_message, parse_raw_message
 from fish.store import (
     count_messages_needing_embedding,
     db_conn,
@@ -120,9 +120,7 @@ def _sync_one_folder(
         def on_batch(fetched: dict[int, dict]) -> None:
             with db_conn() as db:
                 for uid, raw in fetched.items():
-                    parsed = parse_raw_message(
-                        raw["header"], raw["body"], raw.get("flags", [])
-                    )
+                    parsed = parse_fetched_message(raw)
                     _msg_id, changed = upsert_message(
                         db, account_db_id, folder, int(uid), parsed
                     )
@@ -136,6 +134,7 @@ def _sync_one_folder(
             uids,
             on_batch=on_batch,
             progress_cb=msg_bar.update,
+            gmail=account.is_gmail,
         )
         msg_bar.close()
 
@@ -164,7 +163,7 @@ def sync_account(
 ) -> dict:
     init_db()
     stats = {"account": account.email, "folders": {}, "fetched": 0, "new_or_changed": 0, "embedded": 0}
-    skip = ignore_folders()
+    skip = ignore_folders_for_account(account)
     since_label = since.isoformat() if since else f"{days}d"
 
     try:

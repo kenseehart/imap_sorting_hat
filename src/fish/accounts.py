@@ -22,7 +22,14 @@ class Account:
     smtp_port: int = 465
     password_stored: str | None = None
     password_env: str | None = None
+    ignore_folders: list[str] = field(default_factory=list)
     _password_override: str | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def is_gmail(self) -> bool:
+        host = self.imap_host.lower()
+        domain = self.email.split("@", 1)[-1].lower()
+        return host == "imap.gmail.com" or domain in {"gmail.com", "googlemail.com"}
 
     @property
     def password(self) -> str:
@@ -130,13 +137,47 @@ def load_accounts() -> list[Account]:
                 smtp_port=int(raw.get("smtp_port", 465)),
                 password_stored=raw.get("password"),
                 password_env=raw.get("password_env"),
+                ignore_folders=list(raw.get("ignore_folders") or []),
             )
         )
     return accounts
 
 
+def ignore_folders_for_account(account: Account) -> set[str]:
+    global_ignore = set(load_accounts_config().get("ignore_folders", []))
+    return global_ignore | set(account.ignore_folders)
+
+
 def ignore_folders() -> set[str]:
     return set(load_accounts_config().get("ignore_folders", []))
+
+
+def save_ignore_folders(folders: list[str]) -> None:
+    ensure_accounts_file()
+    data = load_accounts_config()
+    data["ignore_folders"] = sorted({name for name in folders if name})
+    ACCOUNTS_PATH.write_text(yaml.safe_dump(data, sort_keys=False, default_flow_style=False))
+
+
+def add_ignore_folder(folder: str) -> list[str]:
+    folder = folder.strip()
+    if not folder:
+        raise ValueError("Folder name is required")
+    current = sorted(ignore_folders())
+    if folder in current:
+        return current
+    current.append(folder)
+    save_ignore_folders(current)
+    return sorted(current)
+
+
+def remove_ignore_folder(folder: str) -> list[str]:
+    folder = folder.strip()
+    current = sorted(ignore_folders())
+    if folder not in current:
+        return current
+    save_ignore_folders([name for name in current if name != folder])
+    return sorted(ignore_folders())
 
 
 def account_by_email(email: str) -> Account | None:

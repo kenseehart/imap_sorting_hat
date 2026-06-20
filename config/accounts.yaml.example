@@ -17,7 +17,17 @@ accounts:
     archive_folder: "[Gmail]/All Mail"
 
 ignore_folders:
-  - "[Gmail]/Trash"
-  - "[Gmail]/Spam"
-  - "Junk"
-  - "Trash"
+  # Gmail label mirrors — sync only [Gmail]/All Mail
+  - INBOX
+  - Drafts
+  - '[Gmail]/Sent Mail'
+  - '[Gmail]/Important'
+  - '[Gmail]/Starred'
+  - '[Gmail]/Drafts'
+  - '[Gmail]/Trash'
+  - '[Gmail]/Spam'
+  # cPanel / Dovecot spam and trash (full folder names)
+  - INBOX.spam
+  - INBOX.Trash
+  - Junk
+  - Trash

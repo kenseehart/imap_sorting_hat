@@ -134,6 +134,101 @@ def search(
     return 0
 
 
+@cmd(output=True)
+def ignore(
+    folder: str | None = optarg(
+        None,
+        positional=True,
+        metavar="FOLDER",
+        help="Folder name to add or remove",
+    ),
+    add: bool = optarg(False, long_flag="--add", action="store_true", help="Add folder to ignore list"),
+    remove: bool = optarg(
+        False, long_flag="--remove", action="store_true", help="Remove folder from ignore list"
+    ),
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """List, add, or remove IMAP folders skipped during sync."""
+    from fish.accounts import add_ignore_folder, remove_ignore_folder
+    from fish.folders import list_ignore_folders
+
+    load_env()
+    if add and remove:
+        print("Use only one of --add or --remove.", file=sys.stderr)
+        return 1
+    if folder and add:
+        folders = add_ignore_folder(folder)
+        emit_output(
+            {"action": "add", "folder": folder, "ignore_folders": folders},
+            json_output=json_output,
+            md=md_output,
+            title="Fish ignore folders",
+        )
+        return 0
+    if folder and remove:
+        folders = remove_ignore_folder(folder)
+        emit_output(
+            {"action": "remove", "folder": folder, "ignore_folders": folders},
+            json_output=json_output,
+            md=md_output,
+            title="Fish ignore folders",
+        )
+        return 0
+    if folder:
+        print("Specify --add or --remove when providing a folder name.", file=sys.stderr)
+        return 1
+    folders = list_ignore_folders()
+    emit_output(
+        {"ignore_folders": folders},
+        json_output=json_output,
+        md=md_output,
+        title=f"Fish ignore folders ({len(folders)})",
+    )
+    return 0
+
+
+@cmd(output=True)
+def folders(
+    email: str | None = optarg(
+        None,
+        positional=True,
+        metavar="EMAIL",
+        help="Account email (default: all configured accounts)",
+    ),
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """List IMAP folders for each account and whether sync skips them."""
+    from fish.folders import folders_report
+
+    load_env()
+    try:
+        report = folders_report(email)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    except Exception as exc:
+        print(exc, file=sys.stderr)
+        return 1
+
+    if not json_output and not md_output:
+        for account in report["accounts"]:
+            print(f"{account['email']} ({account['sync_folder_count']} sync / {account['folder_count']} total)")
+            for row in account["folders"]:
+                mark = "skip" if row["ignored"] else "sync"
+                print(f"  [{mark}] {row['folder']}")
+        print(f"\nGlobal ignore list ({len(report['ignore_folders'])}):")
+        for name in report["ignore_folders"]:
+            print(f"  {name}")
+        return 0
+
+    emit_output(report, json_output=json_output, md=md_output, title="Fish IMAP folders")
+    return 0
+
+
 @cmd
 def backfill(
     since: str = optarg(
