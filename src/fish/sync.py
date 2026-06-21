@@ -8,6 +8,7 @@ from openai import AuthenticationError
 
 from fish.accounts import Account, ignore_folders_for_account, load_accounts
 from fish.config import DEFAULT_SYNC_DAYS, ensure_openai_api_key
+from fish.write_lock import fish_write_lock
 from fish.embed import embed_texts, reset_client
 from fish.prism.inference import adapt_chunk_embedding
 from fish.imap_client import (
@@ -233,16 +234,17 @@ def sync_all(
         if not accounts:
             raise ValueError(f"No matching account: {account}")
 
-    with progress_session(disable=not show_progress):
-        account_bar = progress_bar(
-            accounts,
-            desc="accounts",
-            unit="acct",
-            disable=not show_progress or not accounts,
-        )
-        for acct in account_bar:
-            account_bar.set_postfix_str(acct.email, refresh=False)
-            results.append(
-                sync_account(acct, days=days, since=since, show_progress=show_progress)
+    with fish_write_lock("sync"):
+        with progress_session(disable=not show_progress):
+            account_bar = progress_bar(
+                accounts,
+                desc="accounts",
+                unit="acct",
+                disable=not show_progress or not accounts,
             )
+            for acct in account_bar:
+                account_bar.set_postfix_str(acct.email, refresh=False)
+                results.append(
+                    sync_account(acct, days=days, since=since, show_progress=show_progress)
+                )
     return results

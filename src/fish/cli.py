@@ -8,6 +8,7 @@ from datetime import date
 from cmdline import cmd, create_parser, emit_output, json_dumps, optarg, run_cli, cmds
 
 from fish.config import DEFAULT_SYNC_DAYS, ensure_openai_api_key, load_env
+from fish.write_lock import FishWriteLockError, read_lock_status
 from fish.connect import connect_interactive
 from fish.search import search_corpus, search_messages
 from fish.store import db_conn, init_db, sync_status
@@ -74,6 +75,9 @@ def sync(
     init_db()
     try:
         results = sync_all(days=days, account=email, show_progress=not no_progress)
+    except FishWriteLockError as exc:
+        print(exc, file=sys.stderr)
+        return 1
     except ValueError as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -203,16 +207,38 @@ def import_corpus(
 
 @cmd(output=True)
 def prism_train(
-    sample_size: int = optarg(500, long_flag="--sample", help="Training pairs to label"),
     epochs: int = optarg(5, long_flag="--epochs", help="Training epochs"),
     output: str | None = optarg(
         None, long_flag="--output", help="Output .prz path (default ~/.config/fish/models/personal.prz)"
+    ),
+    retriever: str | None = optarg(
+        None,
+        long_flag="--retriever",
+        help="Train on samples from this retriever only",
+    ),
+    collect_first: bool = optarg(
+        False,
+        long_flag="--collect-first",
+        action="store_true",
+        help="Run corpus collect+label before training",
+    ),
+    collect_retriever: str = optarg(
+        "legacy",
+        long_flag="--collect-retriever",
+        help="Retriever for --collect-first",
+    ),
+    min_queries: int = optarg(
+        50, long_flag="--min-queries", help="Min queries when --collect-first"
+    ),
+    top_k: int = optarg(20, long_flag="--top-k", help="Top-k when --collect-first"),
+    label_limit: int = optarg(
+        500, long_flag="--label-limit", help="Label limit when --collect-first"
     ),
     *,
     json_output: bool = False,
     md_output: bool = False,
 ) -> int:
-    """Generate relevance pairs, train PRISM adapters, and save .prz model."""
+    """Train PRISM adapters from labeled training samples and save .prz model."""
     from pathlib import Path
 
     from fish.prism.train import train_from_corpus
@@ -225,9 +251,14 @@ def prism_train(
         return 1
     try:
         result = train_from_corpus(
-            sample_size=sample_size,
             epochs=epochs,
             output=Path(output) if output else None,
+            retriever=retriever,
+            collect_first=collect_first,
+            collect_retriever=collect_retriever,
+            min_queries=min_queries,
+            top_k=top_k,
+            label_limit=label_limit,
         )
     except Exception as exc:
         print(exc, file=sys.stderr)
@@ -418,13 +449,30 @@ def backfill(
     return 0
 
 
+@cmd(output=True)
+def write_lock_status(*, json_output: bool = False, md_output: bool = False) -> int:
+    """Show whether a Fish DB write lock is held (sync, import, corpus, train)."""
+    status = read_lock_status()
+    payload = {
+        "held": status.held,
+        "path": str(status.path),
+        "pid": status.pid,
+        "operation": status.operation,
+    }
+    emit_output(payload, json_output=json_output, md=md_output, title="Fish write lock")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    from fish.corpus_cli import corpus
+
     parser = create_parser(
-        cmds(sys.modules[__name__]),
+        cmds(sys.modules[__name__]) + corpus.commands,
         prog="fish",
         description="Fish — IMAP sync, RAG, and email agent",
+        groups=[corpus],
     )
-    return run_cli(parser, argv)
+    return run_cli(parser, argv, groups=[corpus])
 
 
 if __name__ == "__main__":

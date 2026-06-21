@@ -8,12 +8,40 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 CONFIG_DIR = Path.home() / ".config" / "fish"
-ACCOUNTS_PATH = CONFIG_DIR / "accounts.yaml"
 ENV_PATH = CONFIG_DIR / "fish.env"
-DB_PATH = CONFIG_DIR / "fish.db"
-MODELS_DIR = CONFIG_DIR / "models"
-IMPORTS_DIR = CONFIG_DIR / "imports"
+ACCOUNTS_PATH = CONFIG_DIR / "accounts.yaml"
 ACTIONS_LOG = CONFIG_DIR / "actions.log"
+
+
+def data_dir() -> Path:
+    """Corpus data root (db, models, imports). Default ~/.config/fish; cloud uses FISH_DATA_DIR."""
+    load_env()
+    raw = os.getenv("FISH_DATA_DIR", "").strip()
+    path = Path(raw).expanduser() if raw else CONFIG_DIR
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "models").mkdir(parents=True, exist_ok=True)
+    (path / "imports").mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def db_path() -> Path:
+    load_env()
+    raw = os.getenv("FISH_DB_PATH", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return data_dir() / "fish.db"
+
+
+def models_dir() -> Path:
+    return data_dir() / "models"
+
+
+def imports_dir() -> Path:
+    return data_dir() / "imports"
+
+
+def write_lock_path() -> Path:
+    return db_path().with_suffix(".write.lock")
 MEMORY_DEDUP_THRESHOLD = 0.95
 MEMORY_MERGE_THRESHOLD = 0.85
 MEMORY_LLM_MODEL = "gpt-4o-mini"
@@ -53,8 +81,6 @@ RECOMMENDED_IGNORE_FOLDERS = (
 
 def ensure_config_dir() -> Path:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    IMPORTS_DIR.mkdir(parents=True, exist_ok=True)
     return CONFIG_DIR
 
 
@@ -167,7 +193,7 @@ def prism_model_path() -> Path | None:
         return None
     path = Path(raw).expanduser()
     if not path.is_absolute():
-        path = MODELS_DIR / raw
+        path = models_dir() / raw
     if not path.exists():
         raise RuntimeError(
             f"FISH_PRISM_MODEL is set to {raw!r} but file not found: {path}"

@@ -64,8 +64,13 @@ def search_corpus(
     init_db()
     ctx = parse_context(context)
     augmented = augment_query(query, ctx)
+    raw_query_embedding = embed_text(augmented)
+    from fish.prism.queries import log_real_query
+
+    ctx_json = json.dumps(ctx) if ctx else None
+    log_real_query(query, ctx_json, query_embedding=raw_query_embedding)
     with db_conn() as db:
-        query_embedding = adapt_query_embedding(embed_text(augmented))
+        query_embedding = adapt_query_embedding(raw_query_embedding)
         vector_hits = corpus_vector_search(
             db, query_embedding, limit=limit, kinds=kinds
         )

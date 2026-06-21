@@ -1,20 +1,18 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from openai import OpenAI
 
-from fish.config import EMBED_DIM, MODELS_DIR, embedding_model, openai_api_key
-from fish.embed import embed_text, embed_texts
+from fish.config import embedding_model, models_dir
 from fish.prism.inference import cosine_similarity
-from fish.prism.model import PrismModel, new_identity_model, save_prz
-from fish.store import db_conn, get_corpus_by_id, init_db
+from fish.prism.model import PrismAdapter, PrismModel, new_identity_model, save_prz
+from fish.store import db_conn, init_db, load_labeled_training_pairs
+from fish.write_lock import fish_write_lock
 
 
 @dataclass
@@ -22,92 +20,41 @@ class TrainingPair:
     query: str
     chunk_id: int
     relevance: float
+    query_embedding: list[float] | None = None
+    chunk_embedding: list[float] | None = None
 
 
 def _pair_hash(query: str, chunk_id: int) -> str:
     return hashlib.sha256(f"{query}\0{chunk_id}".encode()).hexdigest()
 
 
-def sample_corpus_queries(limit: int = 200) -> list[str]:
-    init_db()
-    with db_conn() as db:
-        rows = db.execute(
-            """
-            SELECT text_for_embed, payload, kind FROM corpus_items
-            WHERE embedded_at IS NOT NULL
-            ORDER BY RANDOM()
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-    queries: list[str] = []
-    for row in rows:
-        kind = row["kind"]
-        text = row["text_for_embed"] or ""
-        if kind == "email":
-            payload = json.loads(row["payload"] or "{}")
-            subject = payload.get("subject") or ""
-            if subject:
-                queries.append(subject)
-            if text:
-                queries.append(text[:200])
-        elif kind in ("sms", "chat", "memory"):
-            queries.append(text[:200])
-    return queries[:limit]
-
-
-def generate_training_pairs(
+def load_training_pairs_from_db(
     *,
-    sample_size: int = 500,
-    label_model: str = "gpt-4o-mini",
-    seed: int = 0,
+    exclude_superseded: bool = True,
+    retriever: str | None = None,
 ) -> list[TrainingPair]:
     init_db()
-    rng = random.Random(seed)
-    queries = sample_corpus_queries(limit=max(50, sample_size // 5))
-    if not queries:
-        raise RuntimeError("No embedded corpus items — sync or import data first")
-
     with db_conn() as db:
-        items = db.execute(
-            """
-            SELECT id, text_for_embed, kind FROM corpus_items
-            WHERE embedded_at IS NOT NULL
-            ORDER BY RANDOM()
-            LIMIT ?
-            """,
-            (sample_size * 2,),
-        ).fetchall()
-
-    if not items:
-        raise RuntimeError("No embedded corpus items for training")
-
-    client = OpenAI(api_key=openai_api_key())
+        rows = load_labeled_training_pairs(
+            db,
+            exclude_superseded=exclude_superseded,
+            retriever=retriever,
+        )
     pairs: list[TrainingPair] = []
-    for query in queries:
-        candidates = rng.sample(list(items), min(8, len(items)))
-        for row in candidates:
-            chunk_id = int(row["id"])
-            chunk_text = (row["text_for_embed"] or "")[:1500]
-            prompt = (
-                "Rate relevance of this document to the query on a 0.0-1.0 scale.\n"
-                f"Query: {query}\n\nDocument:\n{chunk_text}\n\n"
-                "Reply with only a number."
+    for row in rows:
+        q_emb = row.get("query_embedding")
+        c_emb = row.get("message_embedding")
+        if not isinstance(q_emb, list) or not isinstance(c_emb, list):
+            continue
+        pairs.append(
+            TrainingPair(
+                query=row["query_text"],
+                chunk_id=int(row["corpus_item_id"]),
+                relevance=float(row["target_relevance"]),
+                query_embedding=q_emb,
+                chunk_embedding=c_emb,
             )
-            response = client.chat.completions.create(
-                model=label_model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=8,
-            )
-            raw = (response.choices[0].message.content or "0").strip()
-            try:
-                relevance = float(raw.split()[0])
-            except (ValueError, IndexError):
-                relevance = 0.0
-            relevance = max(0.0, min(1.0, relevance))
-            pairs.append(TrainingPair(query=query, chunk_id=chunk_id, relevance=relevance))
-            if len(pairs) >= sample_size:
-                return pairs
+        )
     return pairs
 
 
@@ -140,22 +87,15 @@ def _spearman(scores: list[float], labels: list[float]) -> float:
 def evaluate_model(model: PrismModel, pairs: list[TrainingPair]) -> dict[str, float]:
     if not pairs:
         return {"spearman": 0.0, "count": 0.0}
-    init_db()
-    query_texts = list({p.query for p in pairs})
-    q_map = {q: embed_text(q) for q in query_texts}
-    chunk_ids = list({p.chunk_id for p in pairs})
-    with db_conn() as db:
-        from fish.store import get_embedding
-
-        chunks = {cid: get_embedding(db, cid) for cid in chunk_ids}
 
     raw_scores: list[float] = []
     adapted_scores: list[float] = []
+    retrieval_scores: list[float] = []
     labels: list[float] = []
     for pair in pairs:
-        q = q_map[pair.query]
-        c = chunks.get(pair.chunk_id)
-        if c is None:
+        q = pair.query_embedding
+        c = pair.chunk_embedding
+        if q is None or c is None:
             continue
         labels.append(pair.relevance)
         raw_scores.append(cosine_similarity(q, c))
@@ -166,6 +106,15 @@ def evaluate_model(model: PrismModel, pairs: list[TrainingPair]) -> dict[str, fl
     return {
         "spearman_raw": _spearman(raw_scores, labels),
         "spearman_prism": _spearman(adapted_scores, labels),
+        "count": float(len(labels)),
+    }
+
+
+def evaluate_retrieval_similarity(pairs_with_retrieval: list[dict[str, Any]]) -> dict[str, float]:
+    scores = [float(r["retrieval_similarity"]) for r in pairs_with_retrieval]
+    labels = [float(r["target_relevance"]) for r in pairs_with_retrieval]
+    return {
+        "spearman_retrieval": _spearman(scores, labels),
         "count": float(len(labels)),
     }
 
@@ -182,15 +131,6 @@ def train_prism_model(
 
     if not pairs:
         raise ValueError("No training pairs")
-
-    query_texts = list({p.query for p in pairs})
-    q_embeds = {q: embed_text(q) for q in query_texts}
-    chunk_ids = list({p.chunk_id for p in pairs})
-    init_db()
-    with db_conn() as db:
-        from fish.store import get_embedding
-
-        c_embeds = {cid: get_embedding(db, cid) for cid in chunk_ids}
 
     dim = EMBED_DIM
 
@@ -219,16 +159,18 @@ def train_prism_model(
 
     tensors = []
     for pair in pairs:
-        c = c_embeds.get(pair.chunk_id)
-        if c is None:
+        if pair.query_embedding is None or pair.chunk_embedding is None:
             continue
         tensors.append(
             (
-                torch.tensor(q_embeds[pair.query], dtype=torch.float32),
-                torch.tensor(c, dtype=torch.float32),
+                torch.tensor(pair.query_embedding, dtype=torch.float32),
+                torch.tensor(pair.chunk_embedding, dtype=torch.float32),
                 torch.tensor([pair.relevance], dtype=torch.float32),
             )
         )
+
+    if not tensors:
+        raise ValueError("No training pairs with embeddings")
 
     for _epoch in range(epochs):
         random.shuffle(tensors)
@@ -254,8 +196,6 @@ def train_prism_model(
             "alpha": float(module.alpha.detach().cpu().item()),
         }
 
-    from fish.prism.model import PrismAdapter, PrismModel
-
     model = PrismModel(
         query_adapter=PrismAdapter(**{k: v for k, v in export_adapter(q_adapter).items()}),
         chunk_adapter=PrismAdapter(**{k: v for k, v in export_adapter(c_adapter).items()}),
@@ -264,7 +204,7 @@ def train_prism_model(
     )
     _, test = split_pairs(pairs)
     metrics = evaluate_model(model, test)
-    out = output or MODELS_DIR / "personal.prz"
+    out = output or models_dir() / "personal.prz"
     save_prz(model, out)
     metrics["output"] = str(out)
     return model, metrics
@@ -272,19 +212,50 @@ def train_prism_model(
 
 def train_from_corpus(
     *,
-    sample_size: int = 500,
     epochs: int = 5,
     output: Path | None = None,
+    retriever: str | None = None,
+    collect_first: bool = False,
+    collect_retriever: str = "legacy",
+    min_queries: int = 50,
+    top_k: int = 20,
+    label_limit: int = 500,
 ) -> dict[str, Any]:
-    pairs = generate_training_pairs(sample_size=sample_size)
-    train, test = split_pairs(pairs)
-    baseline = new_identity_model()
-    baseline_metrics = evaluate_model(baseline, test)
-    _, metrics = train_prism_model(train, epochs=epochs, output=output)
-    return {
-        "pairs": len(pairs),
-        "train": len(train),
-        "test": len(test),
-        "baseline": baseline_metrics,
-        "trained": metrics,
-    }
+    with fish_write_lock("train"):
+        if collect_first:
+            from fish.prism.collect import collect_samples
+
+            collect_samples(
+                retriever=collect_retriever,
+                min_queries=min_queries,
+                top_k=top_k,
+                label=True,
+                label_limit=label_limit,
+            )
+
+        pairs = load_training_pairs_from_db(retriever=retriever)
+        if not pairs:
+            raise RuntimeError(
+                "No labeled training samples — run fish corpus collect and fish corpus label first"
+            )
+
+        train, test = split_pairs(pairs)
+        baseline = new_identity_model()
+        baseline_metrics = evaluate_model(baseline, test)
+
+        init_db()
+        with db_conn() as db:
+            labeled_rows = load_labeled_training_pairs(
+                db, exclude_superseded=True, retriever=retriever
+            )
+        retrieval_eval = evaluate_retrieval_similarity(labeled_rows)
+
+        _, metrics = train_prism_model(train, epochs=epochs, output=output)
+        return {
+            "pairs": len(pairs),
+            "train": len(train),
+            "test": len(test),
+            "baseline": baseline_metrics,
+            "retrieval_eval": retrieval_eval,
+            "trained": metrics,
+        }

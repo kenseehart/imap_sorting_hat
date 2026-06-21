@@ -8,13 +8,13 @@ from typing import Any
 import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 
-from fish.config import MODELS_DIR
+from fish.config import models_dir
 from fish.store import db_conn, get_embedding, init_db
 
 
 def _model_path(name: str = "folder_classifier.pkl") -> Path:
-    MODELS_DIR.mkdir(parents=True, exist_ok=True)
-    return MODELS_DIR / name
+    models_dir().mkdir(parents=True, exist_ok=True)
+    return models_dir() / name
 
 
 def train_classifier(

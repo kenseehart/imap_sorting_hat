@@ -1,4 +1,11 @@
 resource: daime-prism
 repo: ~/ws/fish
 sync_paths:
-  - ~/.config/fish/models/
+  - models/
+
+# Canonical fish.db lives on mcp-services at /data/fish/fish.db.
+# Before PRISM training on RunPod:
+#   compute sync mcp-services pull fish.db
+#   FISH_DB_PATH=~/.config/fish/fish.db FISH_DATA_DIR=~/.config/fish fish prism-train
+# After training:
+#   compute sync mcp-services push models/personal.prz

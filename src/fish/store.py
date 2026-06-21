@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal
 
 import sqlite_vec
 from sqlite_vec import serialize_float32
 
-from fish.config import DB_PATH, EMBED_DIM, ensure_config_dir
+from fish.config import EMBED_DIM, db_path, ensure_config_dir
 from fish.corpus import CorpusItem, corpus_row_to_dict, email_corpus_from_message
 from fish.parse import ParsedMessage
 
@@ -119,12 +120,62 @@ CREATE TABLE IF NOT EXISTS corpus_items (
 CREATE INDEX IF NOT EXISTS idx_corpus_kind ON corpus_items(kind);
 CREATE INDEX IF NOT EXISTS idx_corpus_occurred ON corpus_items(occurred_at);
 CREATE INDEX IF NOT EXISTS idx_corpus_source ON corpus_items(source);
+
+CREATE TABLE IF NOT EXISTS training_queries (
+    id INTEGER PRIMARY KEY,
+    text TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    parent_query_id INTEGER,
+    context_json TEXT,
+    synthesis_method TEXT,
+    embed_model TEXT,
+    query_embedding BLOB,
+    created_at TEXT NOT NULL,
+    text_hash TEXT NOT NULL,
+    UNIQUE(text_hash, origin),
+    FOREIGN KEY (parent_query_id) REFERENCES training_queries(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_queries_origin ON training_queries(origin);
+
+CREATE TABLE IF NOT EXISTS training_samples (
+    id INTEGER PRIMARY KEY,
+    query_id INTEGER NOT NULL,
+    corpus_item_id INTEGER NOT NULL,
+    source_key TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    occurred_at TEXT,
+    content_hash TEXT,
+    retriever TEXT NOT NULL,
+    retrieval_similarity REAL,
+    retrieval_rank INTEGER,
+    query_embedding BLOB,
+    message_embedding BLOB NOT NULL,
+    target_relevance REAL,
+    relevance_agent_version TEXT,
+    relevance_model TEXT,
+    labeled_at TEXT,
+    created_at TEXT NOT NULL,
+    superseded_at TEXT,
+    pair_hash TEXT NOT NULL UNIQUE,
+    FOREIGN KEY (query_id) REFERENCES training_queries(id),
+    FOREIGN KEY (corpus_item_id) REFERENCES corpus_items(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_samples_kind ON training_samples(kind);
+CREATE INDEX IF NOT EXISTS idx_training_samples_occurred ON training_samples(occurred_at);
+CREATE INDEX IF NOT EXISTS idx_training_samples_retriever ON training_samples(retriever);
+CREATE INDEX IF NOT EXISTS idx_training_samples_agent ON training_samples(relevance_agent_version);
+CREATE INDEX IF NOT EXISTS idx_training_samples_superseded ON training_samples(superseded_at);
+CREATE INDEX IF NOT EXISTS idx_training_samples_corpus ON training_samples(corpus_item_id);
 """
 
 
 def connect() -> sqlite3.Connection:
     ensure_config_dir()
-    db = sqlite3.connect(DB_PATH)
+    db = sqlite3.connect(db_path(), timeout=30)
+    db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA busy_timeout=30000")
     db.row_factory = sqlite3.Row
     db.enable_load_extension(True)
     sqlite_vec.load(db)
@@ -493,6 +544,7 @@ def mark_memory_superseded(
     )
     table = _vec_table(db)
     db.execute(f"DELETE FROM {table} WHERE rowid = ?", (item_id,))
+    mark_samples_superseded_for_corpus(db, item_id)
 
 
 def get_embedding(db: sqlite3.Connection, item_id: int) -> list[float] | None:
@@ -703,6 +755,7 @@ def update_message_flags(db: sqlite3.Connection, message_id: int, flags: list[st
 
 
 def delete_message(db: sqlite3.Connection, message_id: int) -> None:
+    mark_samples_superseded_for_corpus(db, message_id)
     table = _vec_table(db)
     db.execute(f"DELETE FROM {table} WHERE rowid = ?", (message_id,))
     db.execute("DELETE FROM corpus_items WHERE id = ?", (message_id,))
@@ -778,3 +831,407 @@ def save_draft(
 def get_draft(db: sqlite3.Connection, draft_id: int) -> dict[str, Any] | None:
     row = db.execute("SELECT * FROM drafts WHERE id = ?", (draft_id,)).fetchone()
     return dict(row) if row else None
+
+
+QueryOrigin = Literal["real", "synthetic"]
+
+
+def normalize_query_text(text: str) -> str:
+    return " ".join(text.split()).strip().lower()
+
+
+def query_text_hash(text: str) -> str:
+    return hashlib.sha256(normalize_query_text(text).encode()).hexdigest()
+
+
+def sample_pair_hash(query_id: int, corpus_item_id: int, retriever: str) -> str:
+    payload = f"{query_id}\0{corpus_item_id}\0{retriever}"
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def embedding_to_blob(vec: list[float]) -> bytes:
+    return serialize_float32(vec)
+
+
+def blob_to_embedding(blob: bytes | None) -> list[float] | None:
+    if blob is None:
+        return None
+    import numpy as np
+
+    return np.frombuffer(blob, dtype=np.float32).tolist()
+
+
+def training_query_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    data = dict(row)
+    if data.get("query_embedding"):
+        data["query_embedding"] = blob_to_embedding(data["query_embedding"])
+    return data
+
+
+def training_sample_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
+    data = dict(row)
+    if data.get("query_embedding"):
+        data["query_embedding"] = blob_to_embedding(data["query_embedding"])
+    if data.get("message_embedding"):
+        data["message_embedding"] = blob_to_embedding(data["message_embedding"])
+    return data
+
+
+def insert_training_query(
+    db: sqlite3.Connection,
+    *,
+    text: str,
+    origin: QueryOrigin,
+    context_json: str | None = None,
+    parent_query_id: int | None = None,
+    synthesis_method: str | None = None,
+    embed_model: str | None = None,
+    query_embedding: list[float] | None = None,
+) -> int | None:
+    """Insert a training query. Returns id, or None if duplicate."""
+    now = _utcnow()
+    thash = query_text_hash(text)
+    blob = embedding_to_blob(query_embedding) if query_embedding else None
+    try:
+        cur = db.execute(
+            """
+            INSERT INTO training_queries (
+                text, origin, parent_query_id, context_json, synthesis_method,
+                embed_model, query_embedding, created_at, text_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                text,
+                origin,
+                parent_query_id,
+                context_json,
+                synthesis_method,
+                embed_model,
+                blob,
+                now,
+                thash,
+            ),
+        )
+        return int(cur.lastrowid)
+    except sqlite3.IntegrityError:
+        return None
+
+
+def get_training_query(db: sqlite3.Connection, query_id: int) -> dict[str, Any] | None:
+    row = db.execute(
+        "SELECT * FROM training_queries WHERE id = ?", (query_id,)
+    ).fetchone()
+    return training_query_row_to_dict(row) if row else None
+
+
+def count_training_queries(
+    db: sqlite3.Connection, *, origin: QueryOrigin | None = None
+) -> int:
+    if origin:
+        row = db.execute(
+            "SELECT COUNT(*) FROM training_queries WHERE origin = ?", (origin,)
+        ).fetchone()
+    else:
+        row = db.execute("SELECT COUNT(*) FROM training_queries").fetchone()
+    return int(row[0])
+
+
+def list_training_queries(
+    db: sqlite3.Connection,
+    *,
+    origin: QueryOrigin | None = None,
+    limit: int | None = None,
+    require_embedding: bool = False,
+) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM training_queries WHERE 1=1"
+    params: list[Any] = []
+    if origin:
+        sql += " AND origin = ?"
+        params.append(origin)
+    if require_embedding:
+        sql += " AND query_embedding IS NOT NULL"
+    sql += " ORDER BY id"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+    rows = db.execute(sql, params).fetchall()
+    return [training_query_row_to_dict(r) for r in rows]
+
+
+def pick_random_training_queries(
+    db: sqlite3.Connection,
+    *,
+    origin: QueryOrigin,
+    limit: int,
+) -> list[dict[str, Any]]:
+    rows = db.execute(
+        """
+        SELECT * FROM training_queries
+        WHERE origin = ?
+        ORDER BY RANDOM()
+        LIMIT ?
+        """,
+        (origin, limit),
+    ).fetchall()
+    return [training_query_row_to_dict(r) for r in rows]
+
+
+def update_training_query_embedding(
+    db: sqlite3.Connection, query_id: int, embedding: list[float], embed_model: str
+) -> None:
+    db.execute(
+        """
+        UPDATE training_queries
+        SET query_embedding = ?, embed_model = ?
+        WHERE id = ?
+        """,
+        (embedding_to_blob(embedding), embed_model, query_id),
+    )
+
+
+def insert_training_sample(
+    db: sqlite3.Connection,
+    *,
+    query_id: int,
+    corpus_item_id: int,
+    source_key: str,
+    kind: str,
+    occurred_at: str | None,
+    content_hash: str | None,
+    retriever: str,
+    retrieval_similarity: float,
+    retrieval_rank: int,
+    query_embedding: list[float],
+    message_embedding: list[float],
+) -> int | None:
+    """Insert sample. Returns id, or None if pair_hash duplicate."""
+    now = _utcnow()
+    phash = sample_pair_hash(query_id, corpus_item_id, retriever)
+    try:
+        cur = db.execute(
+            """
+            INSERT INTO training_samples (
+                query_id, corpus_item_id, source_key, kind, occurred_at, content_hash,
+                retriever, retrieval_similarity, retrieval_rank,
+                query_embedding, message_embedding, created_at, pair_hash
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                query_id,
+                corpus_item_id,
+                source_key,
+                kind,
+                occurred_at,
+                content_hash,
+                retriever,
+                retrieval_similarity,
+                retrieval_rank,
+                embedding_to_blob(query_embedding),
+                embedding_to_blob(message_embedding),
+                now,
+                phash,
+            ),
+        )
+        return int(cur.lastrowid)
+    except sqlite3.IntegrityError:
+        return None
+
+
+def get_training_sample(db: sqlite3.Connection, sample_id: int) -> dict[str, Any] | None:
+    row = db.execute(
+        "SELECT * FROM training_samples WHERE id = ?", (sample_id,)
+    ).fetchone()
+    return training_sample_row_to_dict(row) if row else None
+
+
+def list_unlabeled_samples(
+    db: sqlite3.Connection,
+    *,
+    limit: int,
+    agent_version: str | None = None,
+    force: bool = False,
+) -> list[dict[str, Any]]:
+    if force:
+        sql = """
+            SELECT * FROM training_samples
+            WHERE superseded_at IS NULL
+            ORDER BY id
+            LIMIT ?
+        """
+        rows = db.execute(sql, (limit,)).fetchall()
+    else:
+        sql = """
+            SELECT * FROM training_samples
+            WHERE superseded_at IS NULL
+              AND (target_relevance IS NULL OR relevance_agent_version IS NULL
+                   OR relevance_agent_version != ?)
+            ORDER BY id
+            LIMIT ?
+        """
+        rows = db.execute(sql, (agent_version or "", limit)).fetchall()
+    return [training_sample_row_to_dict(r) for r in rows]
+
+
+def update_sample_relevance(
+    db: sqlite3.Connection,
+    sample_id: int,
+    *,
+    target_relevance: float,
+    agent_version: str,
+    relevance_model: str,
+) -> None:
+    db.execute(
+        """
+        UPDATE training_samples
+        SET target_relevance = ?, relevance_agent_version = ?,
+            relevance_model = ?, labeled_at = ?
+        WHERE id = ?
+        """,
+        (target_relevance, agent_version, relevance_model, _utcnow(), sample_id),
+    )
+
+
+def training_corpus_stats(db: sqlite3.Connection) -> dict[str, Any]:
+    queries = {
+        row["origin"]: row["n"]
+        for row in db.execute(
+            "SELECT origin, COUNT(*) AS n FROM training_queries GROUP BY origin"
+        ).fetchall()
+    }
+    samples_total = db.execute(
+        "SELECT COUNT(*) FROM training_samples WHERE superseded_at IS NULL"
+    ).fetchone()[0]
+    labeled = db.execute(
+        """
+        SELECT COUNT(*) FROM training_samples
+        WHERE superseded_at IS NULL AND target_relevance IS NOT NULL
+        """
+    ).fetchone()[0]
+    by_retriever = {
+        row["retriever"]: row["n"]
+        for row in db.execute(
+            """
+            SELECT retriever, COUNT(*) AS n FROM training_samples
+            WHERE superseded_at IS NULL
+            GROUP BY retriever
+            """
+        ).fetchall()
+    }
+    by_kind = {
+        row["kind"]: row["n"]
+        for row in db.execute(
+            """
+            SELECT kind, COUNT(*) AS n FROM training_samples
+            WHERE superseded_at IS NULL
+            GROUP BY kind
+            """
+        ).fetchall()
+    }
+    stale = db.execute(
+        """
+        SELECT COUNT(*) FROM training_samples s
+        JOIN corpus_items c ON c.id = s.corpus_item_id
+        WHERE s.superseded_at IS NULL
+          AND s.content_hash IS NOT NULL
+          AND c.content_hash IS NOT NULL
+          AND s.content_hash != c.content_hash
+        """
+    ).fetchone()[0]
+    return {
+        "queries": queries,
+        "samples_total": int(samples_total),
+        "samples_labeled": int(labeled),
+        "samples_unlabeled": int(samples_total) - int(labeled),
+        "samples_by_retriever": by_retriever,
+        "samples_by_kind": by_kind,
+        "samples_stale": int(stale),
+    }
+
+
+def mark_samples_superseded_for_corpus(db: sqlite3.Connection, corpus_item_id: int) -> int:
+    cur = db.execute(
+        """
+        UPDATE training_samples
+        SET superseded_at = ?
+        WHERE corpus_item_id = ? AND superseded_at IS NULL
+        """,
+        (_utcnow(), corpus_item_id),
+    )
+    return cur.rowcount
+
+
+def mark_stale_samples(db: sqlite3.Connection) -> int:
+    cur = db.execute(
+        """
+        UPDATE training_samples
+        SET superseded_at = ?
+        WHERE superseded_at IS NULL
+          AND id IN (
+            SELECT s.id FROM training_samples s
+            JOIN corpus_items c ON c.id = s.corpus_item_id
+            WHERE s.content_hash IS NOT NULL
+              AND c.content_hash IS NOT NULL
+              AND s.content_hash != c.content_hash
+          )
+        """,
+        (_utcnow(),),
+    )
+    return cur.rowcount
+
+
+def purge_training_samples(
+    db: sqlite3.Connection,
+    *,
+    stale: bool = False,
+    kind: str | None = None,
+    before: str | None = None,
+    retriever: str | None = None,
+    superseded_only: bool = False,
+) -> int:
+    sql = "DELETE FROM training_samples WHERE 1=1"
+    params: list[Any] = []
+    if superseded_only:
+        sql += " AND superseded_at IS NOT NULL"
+    if stale:
+        sql += """
+            AND id IN (
+                SELECT s.id FROM training_samples s
+                JOIN corpus_items c ON c.id = s.corpus_item_id
+                WHERE s.content_hash IS NOT NULL
+                  AND c.content_hash IS NOT NULL
+                  AND s.content_hash != c.content_hash
+            )
+        """
+    if kind:
+        sql += " AND kind = ?"
+        params.append(kind)
+    if before:
+        sql += " AND occurred_at < ?"
+        params.append(before)
+    if retriever:
+        sql += " AND retriever = ?"
+        params.append(retriever)
+    cur = db.execute(sql, params)
+    return cur.rowcount
+
+
+def load_labeled_training_pairs(
+    db: sqlite3.Connection,
+    *,
+    exclude_superseded: bool = True,
+    retriever: str | None = None,
+) -> list[dict[str, Any]]:
+    sql = """
+        SELECT s.*, q.text AS query_text, q.context_json
+        FROM training_samples s
+        JOIN training_queries q ON q.id = s.query_id
+        WHERE s.target_relevance IS NOT NULL
+    """
+    params: list[Any] = []
+    if exclude_superseded:
+        sql += " AND s.superseded_at IS NULL"
+    if retriever:
+        sql += " AND s.retriever = ?"
+        params.append(retriever)
+    rows = db.execute(sql, params).fetchall()
+    return [training_sample_row_to_dict(r) for r in rows]

@@ -15,15 +15,48 @@ Personal knowledge corpus with PRISM retrieval:
 - **Chat** — ChatGPT / Claude.ai official export ZIPs (turn-level chunks)
 - **Memory** — agent-written facts (`fish_memory_upsert`); similar facts are reconciled by LLM (duplicate / merge / distinct)
 
-Storage: SQLite `~/.config/fish/fish.db` + **sqlite-vec** (`corpus_items` / `corpus_vec`). Optional PRISM adapters (`.prz` in `~/.config/fish/models/`). Session **context JSON** augments search and prompts — see [`docs/context.md`](docs/context.md).
+Storage: SQLite **`fish.db`** + **sqlite-vec** (`corpus_items` / `corpus_vec`). Optional PRISM adapters (`.prz` in `models/`). Session **context JSON** augments search and prompts — see [`docs/context.md`](docs/context.md).
+
+**Production corpus:** canonical db on GCP `mcp-services` at `/data/fish/fish.db` (PD `fish-data`). See [`docs/cloud.md`](docs/cloud.md).
 
 ## Architecture
 
-- **Sync**: `imapclient` → `messages` + mirrored `corpus_items` (kind=email)
+- **Sync**: `imapclient` → `messages` + mirrored `corpus_items` (kind=email) — **cloud cron on mcp-services**
 - **Import**: `fish import-corpus` — SMS, ChatGPT, Claude — see [`docs/import-runbook.md`](docs/import-runbook.md)
 - **Search**: hybrid semantic + keyword + context boosts; PRISM query/chunk adapters when `FISH_PRISM_MODEL` set
-- **MCP (local)**: `python -m fish.mcp_server` — registered as `fish` in `.cursor/mcp.json`
-- **Training**: `fish prism-train` (labels pairs via OpenAI, trains adapters; needs `uv sync --extra prism` for torch)
+- **MCP (remote)**: `https://mcp.seehart.com/fish/mcp` (Claude.ai connector)
+- **MCP (local dev)**: `python -m fish.mcp_server` — optional; reads local db unless `FISH_DB_PATH` set
+- **Training**: `fish prism-train` on RunPod after `compute sync mcp-services pull fish.db` — see [`docs/cloud.md`](docs/cloud.md)
+- **Write lock**: exclusive lock for sync / import / corpus / train — `fish write-lock-status`
+
+## Training corpus
+
+Real queries are logged automatically on every `fish search` / `fish_search` call into `training_queries`.
+
+| Table | Purpose |
+|-------|---------|
+| `training_queries` | Real (logged searches) and synthetic (QuerySynthesisAgent) queries |
+| `training_samples` | (query, corpus item) pairs with metadata |
+
+Key sample fields:
+
+| Field | Meaning |
+|-------|---------|
+| `retrieval_similarity` | Eval only — cosine from retriever at collect time |
+| `target_relevance` | RelevanceAgent label — **training target** |
+| `retriever` | `legacy` or model stem without `.prz` (e.g. `personal`) |
+
+Workflow:
+
+```bash
+fish search "some query"              # logs real query
+fish corpus collect --retriever legacy --min-queries 50 --top-k 20
+fish corpus label --limit 500
+fish corpus stats
+fish prism-train                      # MSE on target_relevance
+```
+
+Compare retrievers by collecting with `--retriever legacy` vs `--retriever personal` (separate runs).
 
 ## Setup
 
@@ -47,7 +80,12 @@ fish connect <email>
 | `fish import-corpus <source> <path>` | Import `android-sms`, `chatgpt`, or `claude` |
 | `fish memory` / MCP | `fish_memory_upsert` for agent memories |
 | `fish embedding-get <id>` | Stored embedding vector for a corpus item |
-| `fish prism-train` | Train PRISM adapters → `~/.config/fish/models/personal.prz` |
+| `fish prism-train` | Train PRISM adapters from labeled samples → `personal.prz` |
+| `fish corpus collect` | `--retriever legacy\|personal`, synthesize queries, top-k samples |
+| `fish corpus label` | RelevanceAgent labels (`target_relevance`) |
+| `fish corpus stats` | Query/sample counts |
+| `fish corpus purge` | Remove stale or superseded samples |
+| `fish corpus browse` | Local Datasette UI for `fish.db` (alias: `dbserv fish`) |
 | `fish sync` | IMAP sync + embed |
 | `fish status` | Config, connectivity, corpus counts by kind |
 
@@ -62,11 +100,11 @@ Write: `fish_sync_run`, `fish_message_move`, `fish_message_archive`, `fish_bulk_
 | File | Purpose |
 |------|---------|
 | `~/.config/fish/accounts.yaml` | IMAP/SMTP accounts |
-| `~/.config/fish/fish.env` | `OPENAI_API_KEY`, optional `FISH_PRISM_MODEL` |
-| `~/.config/fish/fish.db` | Corpus + IMAP state |
-| `~/.config/fish/models/` | PRISM `.prz` files, classifiers |
+| `~/.config/fish/fish.env` | `OPENAI_API_KEY`, optional `FISH_PRISM_MODEL`, `FISH_DATA_DIR`, `FISH_DB_PATH` |
+| `fish.db` | Corpus + IMAP state — **cloud:** `/data/fish/fish.db`; **local dev:** `~/.config/fish/fish.db` |
+| `models/` | PRISM `.prz` files — **cloud:** `/data/fish/models/` |
 | `~/.config/fish/context_rules.yaml` | Context-based retrieval boosts |
-| `~/.config/fish/imports/` | Drop zone for export files |
+| `imports/` | Drop zone for export files — **cloud:** `/data/fish/imports/` |
 
 ## PRISM
 
@@ -77,4 +115,4 @@ Activate after training:
 FISH_PRISM_MODEL=personal.prz
 ```
 
-Heavy training: RunPod `prism-train` per [`compute.yaml`](compute.yaml) and [`docs/deploy.md`](docs/deploy.md).
+Heavy training: RunPod `prism-train` per [`compute.yaml`](compute.yaml), [`docs/cloud.md`](docs/cloud.md), and [`docs/deploy.md`](docs/deploy.md).

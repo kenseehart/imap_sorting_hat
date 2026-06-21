@@ -8,6 +8,7 @@ from fish.import_sources.android_sms import import_android_sms
 from fish.import_sources.chatgpt import import_chatgpt_export, import_chatgpt_memory_json
 from fish.import_sources.claude import import_claude_export
 from fish.sync import embed_all_pending
+from fish.write_lock import fish_write_lock
 
 
 def run_import(
@@ -23,6 +24,23 @@ def run_import(
     if not path.exists():
         raise FileNotFoundError(path)
 
+    if dry_run:
+        return _run_import_body(source, path, dry_run=True, phone_filter=phone_filter, embed=False)
+
+    with fish_write_lock("import"):
+        return _run_import_body(
+            source, path, dry_run=False, phone_filter=phone_filter, embed=embed
+        )
+
+
+def _run_import_body(
+    source: str,
+    path: Path,
+    *,
+    dry_run: bool,
+    phone_filter: str | None,
+    embed: bool,
+) -> dict[str, Any]:
     if source == "android-sms":
         stats = import_android_sms(
             path, phone_filter=phone_filter or "8315352442", dry_run=dry_run

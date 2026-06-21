@@ -31,6 +31,7 @@ from fish.store import (
 )
 from fish.sync import sync_account, sync_all
 from fish.topics import extract_topics, label_topics_with_llm, list_topics, topic_graph, topic_messages
+from fish.write_lock import FishWriteLockError
 
 FISH_INSTRUCTIONS = (
     "Fish provides read/write access to Ken's personal corpus: IMAP email, SMS, chat exports, "
@@ -94,7 +95,10 @@ def register_tools(mcp: Any, as_json: bool = True, audit_decorator: Any = None) 
     @tool()
     def fish_sync_run(days: int = DEFAULT_SYNC_DAYS) -> Any:
         """Sync mail from all configured accounts (default last 90 days)."""
-        return out(sync_all(days=days))
+        try:
+            return out(sync_all(days=days))
+        except FishWriteLockError as exc:
+            return out({"error": str(exc)})
 
     @tool()
     def fish_sync_status() -> Any:
