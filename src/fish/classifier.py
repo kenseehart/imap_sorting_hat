@@ -9,7 +9,7 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier
 
 from fish.config import MODELS_DIR
-from fish.store import db_conn, init_db
+from fish.store import db_conn, get_embedding, init_db
 
 
 def _model_path(name: str = "folder_classifier.pkl") -> Path:
@@ -30,13 +30,10 @@ def train_classifier(
         vectors = []
         y = []
         for msg_id, label in labels.items():
-            row = db.execute(
-                "SELECT embedding FROM message_vec WHERE rowid = ?", (msg_id,)
-            ).fetchone()
-            if not row:
+            vec = get_embedding(db, msg_id)
+            if vec is None:
                 continue
-            vec = np.frombuffer(row["embedding"], dtype=np.float32)
-            vectors.append(vec)
+            vectors.append(np.asarray(vec, dtype=np.float32))
             y.append(label)
 
     if len(vectors) < 2:
@@ -62,14 +59,12 @@ def predict_labels(message_ids: list[int], name: str = "folder_classifier") -> l
     results = []
     with db_conn() as db:
         for msg_id in message_ids:
-            row = db.execute(
-                "SELECT embedding FROM message_vec WHERE rowid = ?", (msg_id,)
-            ).fetchone()
-            if not row:
+            vec = get_embedding(db, msg_id)
+            if vec is None:
                 continue
-            vec = np.frombuffer(row["embedding"], dtype=np.float32).reshape(1, -1)
-            pred = clf.predict(vec)[0]
-            proba = clf.predict_proba(vec)[0]
+            arr = np.asarray(vec, dtype=np.float32).reshape(1, -1)
+            pred = clf.predict(arr)[0]
+            proba = clf.predict_proba(arr)[0]
             ranked = sorted(zip(clf.classes_, proba), key=lambda x: x[1], reverse=True)
             results.append(
                 {

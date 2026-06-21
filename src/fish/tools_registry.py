@@ -330,7 +330,7 @@ def register_tools(mcp: Any, as_json: bool = True, audit_decorator: Any = None) 
         provenance: str | None = None,
         expires_at: str | None = None,
     ) -> Any:
-        """Store a durable agent memory fact for semantic retrieval."""
+        """Store a durable agent memory. Similar facts are merged agentically (duplicate/merge/distinct)."""
         tags = json.loads(tags_json)
         return out(
             upsert_memory(

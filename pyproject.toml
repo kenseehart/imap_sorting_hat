@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "IMAP email sync, RAG, and MCP agent for multi-account mail"
 requires-python = ">=3.10"
 dependencies = [
+    "beautifulsoup4>=4.12.0",
     "cryptography>=42.0.0",
     "fastmcp>=2.0.0",
     "imapclient>=3.0.0",
@@ -20,6 +21,9 @@ dependencies = [
     "ken-mcp",
     "util",
 ]
+
+[project.optional-dependencies]
+prism = ["torch>=2.0.0"]
 
 [tool.uv.sources]
 cmdline = { path = "../shared/cmdline", editable = true }

@@ -19,10 +19,10 @@ def _fetch_recent_embeddings(limit: int = 200) -> list[tuple[int, list[float], s
     with db_conn() as db:
         rows = db.execute(
             """
-            SELECT m.id, m.subject, v.embedding
-            FROM messages m
-            JOIN message_vec v ON v.rowid = m.id
-            ORDER BY m.date DESC
+            SELECT c.id, json_extract(c.payload, '$.subject') AS subject, v.embedding
+            FROM corpus_items c
+            JOIN corpus_vec v ON v.rowid = c.id
+            ORDER BY c.occurred_at DESC
             LIMIT ?
             """,
             (limit,),

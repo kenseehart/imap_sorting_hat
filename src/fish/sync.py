@@ -9,6 +9,7 @@ from openai import AuthenticationError
 from fish.accounts import Account, ignore_folders_for_account, load_accounts
 from fish.config import DEFAULT_SYNC_DAYS, ensure_openai_api_key
 from fish.embed import embed_texts, reset_client
+from fish.prism.inference import adapt_chunk_embedding
 from fish.imap_client import (
     ResilientImap,
     fetch_folder_messages,
@@ -20,11 +21,11 @@ from fish.imap_client import (
 )
 from fish.parse import parse_fetched_message, parse_raw_message
 from fish.store import (
-    count_messages_needing_embedding,
+    count_corpus_needing_embedding,
+    corpus_needing_embedding,
     db_conn,
     init_db,
-    messages_needing_embedding,
-    set_embedding,
+    set_corpus_embedding,
     update_sync_state,
     upsert_account,
     upsert_message,
@@ -32,7 +33,7 @@ from fish.store import (
 
 logger = logging.getLogger(__name__)
 
-EMBED_BATCH = 50
+EMBED_BATCH = 100
 
 
 def embed_pending(batch_size: int = EMBED_BATCH, *, auth_retry: bool = True) -> int:
@@ -40,13 +41,14 @@ def embed_pending(batch_size: int = EMBED_BATCH, *, auth_retry: bool = True) -> 
     embedded = 0
     try:
         with db_conn() as db:
-            pending = messages_needing_embedding(db, limit=batch_size)
+            pending = corpus_needing_embedding(db, limit=batch_size)
             if not pending:
                 return 0
-            texts = [row["body_for_embed"] for row in pending]
+            texts = [row["text_for_embed"] for row in pending]
             vectors = embed_texts(texts)
             for row, vector in zip(pending, vectors):
-                set_embedding(db, int(row["id"]), vector)
+                adapted = adapt_chunk_embedding(vector)
+                set_corpus_embedding(db, int(row["id"]), adapted)
                 embedded += 1
     except AuthenticationError:
         if not auth_retry:
@@ -61,7 +63,7 @@ def embed_pending(batch_size: int = EMBED_BATCH, *, auth_retry: bool = True) -> 
 def embed_all_pending(*, show_progress: bool = True) -> int:
     init_db()
     with db_conn() as db:
-        total = count_messages_needing_embedding(db)
+        total = count_corpus_needing_embedding(db)
     if total == 0:
         return 0
 

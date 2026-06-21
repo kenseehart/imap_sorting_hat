@@ -10,6 +10,7 @@ import sqlite_vec
 from sqlite_vec import serialize_float32
 
 from fish.config import DB_PATH, EMBED_DIM, ensure_config_dir
+from fish.corpus import CorpusItem, corpus_row_to_dict, email_corpus_from_message
 from fish.parse import ParsedMessage
 
 
@@ -99,6 +100,25 @@ CREATE TABLE IF NOT EXISTS drafts (
     in_reply_to TEXT,
     created_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS corpus_items (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,
+    source TEXT NOT NULL,
+    source_key TEXT NOT NULL UNIQUE,
+    text_for_embed TEXT NOT NULL,
+    body_text TEXT,
+    occurred_at TEXT,
+    ingested_at TEXT,
+    embedded_at TEXT,
+    content_hash TEXT,
+    payload TEXT,
+    tags TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_corpus_kind ON corpus_items(kind);
+CREATE INDEX IF NOT EXISTS idx_corpus_occurred ON corpus_items(occurred_at);
+CREATE INDEX IF NOT EXISTS idx_corpus_source ON corpus_items(source);
 """
 
 
@@ -131,13 +151,52 @@ def init_db() -> None:
         cols = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
         if "gmail_labels" not in cols:
             db.execute("ALTER TABLE messages ADD COLUMN gmail_labels TEXT")
-        row = db.execute(
+        _ensure_vec_table(db, "corpus_vec")
+        _ensure_vec_table(db, "message_vec")
+        _migrate_messages_to_corpus(db)
+
+
+def _ensure_vec_table(db: sqlite3.Connection, name: str) -> None:
+    row = db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone()
+    if not row:
+        db.execute(
+            f"CREATE VIRTUAL TABLE {name} USING vec0(embedding float[{EMBED_DIM}])"
+        )
+
+
+def _vec_table(db: sqlite3.Connection) -> str:
+    row = db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='corpus_vec'"
+    ).fetchone()
+    return "corpus_vec" if row else "message_vec"
+
+
+def _migrate_messages_to_corpus(db: sqlite3.Connection) -> None:
+    meta = db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='corpus_items'"
+    ).fetchone()
+    if not meta:
+        return
+    count = db.execute("SELECT COUNT(*) FROM corpus_items WHERE kind='email'").fetchone()[0]
+    msg_count = db.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+    if msg_count and count < msg_count:
+        rows = db.execute("SELECT * FROM messages").fetchall()
+        for row in rows:
+            _upsert_email_corpus_from_row(db, dict(row))
+    if _vec_table(db) == "corpus_vec":
+        legacy = db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='message_vec'"
         ).fetchone()
-        if not row:
-            db.execute(
-                f"CREATE VIRTUAL TABLE message_vec USING vec0(embedding float[{EMBED_DIM}])"
-            )
+        if legacy:
+            copied = db.execute("SELECT COUNT(*) FROM corpus_vec").fetchone()[0]
+            if copied == 0:
+                for row in db.execute("SELECT rowid, embedding FROM message_vec").fetchall():
+                    db.execute(
+                        "INSERT INTO corpus_vec(rowid, embedding) VALUES (?, ?)",
+                        (int(row["rowid"]), row["embedding"]),
+                    )
 
 
 def upsert_account(
@@ -189,6 +248,19 @@ def upsert_message(
 ) -> tuple[int, bool]:
     existing = get_message_by_uid(db, account_id, folder, uid)
     if existing and existing["content_hash"] == parsed.content_hash:
+        acct = db.execute(
+            "SELECT email FROM accounts WHERE id = ?", (account_id,)
+        ).fetchone()
+        _upsert_email_corpus(
+            db,
+            int(existing["id"]),
+            account_id,
+            folder,
+            uid,
+            parsed,
+            acct["email"] if acct else None,
+            embedded_at=existing.get("embedded_at"),
+        )
         return int(existing["id"]), False
 
     db.execute(
@@ -232,34 +304,252 @@ def upsert_message(
         ),
     )
     row = get_message_by_uid(db, account_id, folder, uid)
-    return int(row["id"]), True
+    msg_id = int(row["id"])
+    acct = db.execute("SELECT email FROM accounts WHERE id = ?", (account_id,)).fetchone()
+    account_email = acct["email"] if acct else None
+    _upsert_email_corpus(db, msg_id, account_id, folder, uid, parsed, account_email)
+    return msg_id, True
+
+
+def _upsert_email_corpus_from_row(db: sqlite3.Connection, row: dict[str, Any]) -> int:
+    from fish.parse import ParsedMessage
+
+    parsed = ParsedMessage(
+        subject=row.get("subject") or "",
+        from_addrs=[row.get("from_addr") or ""] if row.get("from_addr") else [],
+        to_addrs=json.loads(row.get("to_addrs") or "[]"),
+        cc_addrs=json.loads(row.get("cc_addrs") or "[]"),
+        message_id=row.get("message_id") or "",
+        in_reply_to=row.get("in_reply_to") or "",
+        date=row.get("date"),
+        flags=json.loads(row.get("flags") or "[]"),
+        body_text=row.get("body_text") or "",
+        body_for_embed=row.get("body_for_embed") or "",
+        content_hash=row.get("content_hash") or "",
+        gmail_labels=json.loads(row["gmail_labels"]) if row.get("gmail_labels") else None,
+    )
+    acct = db.execute(
+        "SELECT email FROM accounts WHERE id = ?", (row["account_id"],)
+    ).fetchone()
+    return _upsert_email_corpus(
+        db,
+        int(row["id"]),
+        int(row["account_id"]),
+        row["folder"],
+        int(row["uid"]),
+        parsed,
+        acct["email"] if acct else None,
+        embedded_at=row.get("embedded_at"),
+    )
+
+
+def _upsert_email_corpus(
+    db: sqlite3.Connection,
+    message_id: int,
+    account_id: int,
+    folder: str,
+    uid: int,
+    parsed: ParsedMessage,
+    account_email: str | None,
+    *,
+    embedded_at: str | None = None,
+) -> int:
+    item = email_corpus_from_message(
+        message_id, account_id, folder, uid, parsed, account_email
+    )
+    existing = get_corpus_by_source_key(db, item.source_key)
+    preserve_embedded = embedded_at
+    if existing and existing.get("embedded_at") and parsed.content_hash == existing.get("content_hash"):
+        preserve_embedded = existing["embedded_at"]
+    elif existing and existing.get("embedded_at") and parsed.content_hash != existing.get("content_hash"):
+        preserve_embedded = None
+        db.execute(f"DELETE FROM {_vec_table(db)} WHERE rowid = ?", (message_id,))
+    return upsert_corpus_item(db, item, item_id=message_id, embedded_at=preserve_embedded)
+
+
+def upsert_corpus_item(
+    db: sqlite3.Connection,
+    item: CorpusItem,
+    *,
+    item_id: int | None = None,
+    embedded_at: str | None = None,
+) -> int:
+    now = _utcnow()
+    embedded = embedded_at if embedded_at is not None else item.embedded_at
+    if item_id is not None:
+        db.execute(
+            """
+            INSERT INTO corpus_items (
+                id, kind, source, source_key, text_for_embed, body_text,
+                occurred_at, ingested_at, embedded_at, content_hash, payload, tags
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_key) DO UPDATE SET
+                kind=excluded.kind,
+                source=excluded.source,
+                text_for_embed=excluded.text_for_embed,
+                body_text=excluded.body_text,
+                occurred_at=excluded.occurred_at,
+                content_hash=excluded.content_hash,
+                payload=excluded.payload,
+                tags=excluded.tags,
+                embedded_at=CASE
+                    WHEN corpus_items.content_hash != excluded.content_hash THEN NULL
+                    ELSE COALESCE(corpus_items.embedded_at, excluded.embedded_at)
+                END
+            """,
+            (
+                item_id,
+                item.kind,
+                item.source,
+                item.source_key,
+                item.text_for_embed,
+                item.body_text,
+                item.occurred_at,
+                now,
+                embedded,
+                item.content_hash_value,
+                json.dumps(item.payload),
+                json.dumps(item.tags),
+            ),
+        )
+    else:
+        db.execute(
+            """
+            INSERT INTO corpus_items (
+                kind, source, source_key, text_for_embed, body_text,
+                occurred_at, ingested_at, embedded_at, content_hash, payload, tags
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_key) DO UPDATE SET
+                kind=excluded.kind,
+                source=excluded.source,
+                text_for_embed=excluded.text_for_embed,
+                body_text=excluded.body_text,
+                occurred_at=excluded.occurred_at,
+                content_hash=excluded.content_hash,
+                payload=excluded.payload,
+                tags=excluded.tags,
+                embedded_at=CASE
+                    WHEN corpus_items.content_hash != excluded.content_hash THEN NULL
+                    ELSE COALESCE(corpus_items.embedded_at, excluded.embedded_at)
+                END
+            """,
+            (
+                item.kind,
+                item.source,
+                item.source_key,
+                item.text_for_embed,
+                item.body_text,
+                item.occurred_at,
+                now,
+                embedded,
+                item.content_hash_value,
+                json.dumps(item.payload),
+                json.dumps(item.tags),
+            ),
+        )
+    row = db.execute(
+        "SELECT id FROM corpus_items WHERE source_key = ?", (item.source_key,)
+    ).fetchone()
+    return int(row["id"])
+
+
+def get_corpus_by_id(db: sqlite3.Connection, item_id: int) -> dict[str, Any] | None:
+    row = db.execute("SELECT * FROM corpus_items WHERE id = ?", (item_id,)).fetchone()
+    return corpus_row_to_dict(row) if row else None
+
+
+def get_corpus_by_source_key(db: sqlite3.Connection, source_key: str) -> dict[str, Any] | None:
+    row = db.execute(
+        "SELECT * FROM corpus_items WHERE source_key = ?", (source_key,)
+    ).fetchone()
+    return corpus_row_to_dict(row) if row else None
+
+
+def corpus_payload(row: dict[str, Any]) -> dict[str, Any]:
+    payload = row.get("payload")
+    if isinstance(payload, str):
+        return json.loads(payload)
+    return payload if isinstance(payload, dict) else {}
+
+
+def memory_is_active(row: dict[str, Any]) -> bool:
+    if row.get("kind") != "memory":
+        return True
+    return corpus_payload(row).get("superseded_by") is None
+
+
+def mark_memory_superseded(
+    db: sqlite3.Connection, item_id: int, superseded_by: int
+) -> None:
+    row = get_corpus_by_id(db, item_id)
+    if not row:
+        raise ValueError(f"Memory {item_id} not found")
+    payload = corpus_payload(row)
+    payload["superseded_by"] = superseded_by
+    payload["superseded_at"] = _utcnow()
+    db.execute(
+        "UPDATE corpus_items SET payload = ? WHERE id = ?",
+        (json.dumps(payload), item_id),
+    )
+    table = _vec_table(db)
+    db.execute(f"DELETE FROM {table} WHERE rowid = ?", (item_id,))
+
+
+def get_embedding(db: sqlite3.Connection, item_id: int) -> list[float] | None:
+    import numpy as np
+
+    table = _vec_table(db)
+    row = db.execute(
+        f"SELECT embedding FROM {table} WHERE rowid = ?", (item_id,)
+    ).fetchone()
+    if not row:
+        return None
+    return np.frombuffer(row["embedding"], dtype=np.float32).tolist()
 
 
 def set_embedding(db: sqlite3.Connection, message_id: int, embedding: list[float]) -> None:
-    db.execute("DELETE FROM message_vec WHERE rowid = ?", (message_id,))
+    set_corpus_embedding(db, message_id, embedding)
+
+
+def set_corpus_embedding(db: sqlite3.Connection, item_id: int, embedding: list[float]) -> None:
+    table = _vec_table(db)
+    db.execute(f"DELETE FROM {table} WHERE rowid = ?", (item_id,))
     db.execute(
-        "INSERT INTO message_vec(rowid, embedding) VALUES (?, ?)",
-        (message_id, serialize_float32(embedding)),
+        f"INSERT INTO {table}(rowid, embedding) VALUES (?, ?)",
+        (item_id, serialize_float32(embedding)),
+    )
+    now = _utcnow()
+    db.execute(
+        "UPDATE corpus_items SET embedded_at = ? WHERE id = ?",
+        (now, item_id),
     )
     db.execute(
         "UPDATE messages SET embedded_at = ? WHERE id = ?",
-        (_utcnow(), message_id),
+        (now, item_id),
     )
 
 
 def count_messages_needing_embedding(db: sqlite3.Connection) -> int:
+    return count_corpus_needing_embedding(db)
+
+
+def count_corpus_needing_embedding(db: sqlite3.Connection) -> int:
     row = db.execute(
-        "SELECT COUNT(*) FROM messages WHERE embedded_at IS NULL"
+        "SELECT COUNT(*) FROM corpus_items WHERE embedded_at IS NULL"
     ).fetchone()
     return int(row[0])
 
 
 def messages_needing_embedding(db: sqlite3.Connection, limit: int = 100) -> list[dict[str, Any]]:
+    return corpus_needing_embedding(db, limit=limit)
+
+
+def corpus_needing_embedding(db: sqlite3.Connection, limit: int = 100) -> list[dict[str, Any]]:
     rows = db.execute(
         """
-        SELECT id, body_for_embed FROM messages
+        SELECT id, text_for_embed FROM corpus_items
         WHERE embedded_at IS NULL
-        ORDER BY date DESC
+        ORDER BY occurred_at DESC
         LIMIT ?
         """,
         (limit,),
@@ -270,22 +560,43 @@ def messages_needing_embedding(db: sqlite3.Connection, limit: int = 100) -> list
 def vector_search(
     db: sqlite3.Connection, query_embedding: list[float], limit: int = 20
 ) -> list[tuple[int, float]]:
+    return corpus_vector_search(db, query_embedding, limit=limit)
+
+
+def corpus_vector_search(
+    db: sqlite3.Connection,
+    query_embedding: list[float],
+    limit: int = 20,
+    kinds: list[str] | None = None,
+) -> list[tuple[int, float]]:
     k = int(limit)
     if k <= 0:
-        raise ValueError(f"vector_search limit must be positive, got {limit!r}")
-    # sqlite-vec vec0 KNN requires `k = ?` in the WHERE clause. Plain `LIMIT ?`
-    # fails on SQLite < 3.41 (system python here is 3.37.x).
+        raise ValueError(f"corpus_vector_search limit must be positive, got {limit!r}")
+    table = _vec_table(db)
     rows = db.execute(
-        """
+        f"""
         SELECT rowid, distance
-        FROM message_vec
+        FROM {table}
         WHERE embedding MATCH ?
           AND k = ?
         ORDER BY distance
         """,
-        (serialize_float32(query_embedding), k),
+        (serialize_float32(query_embedding), k * 3 if kinds else k),
     ).fetchall()
-    return [(int(r[0]), float(r[1])) for r in rows]
+    hits = [(int(r[0]), float(r[1])) for r in rows]
+    if not kinds:
+        return hits[:k]
+    allowed = set(kinds)
+    filtered: list[tuple[int, float]] = []
+    for item_id, dist in hits:
+        row = db.execute(
+            "SELECT kind FROM corpus_items WHERE id = ?", (item_id,)
+        ).fetchone()
+        if row and row["kind"] in allowed:
+            filtered.append((item_id, dist))
+        if len(filtered) >= k:
+            break
+    return filtered
 
 
 def keyword_search(
@@ -294,24 +605,44 @@ def keyword_search(
     account_email: str | None = None,
     folder: str | None = None,
     limit: int = 50,
+    kinds: list[str] | None = None,
+) -> list[int]:
+    return corpus_keyword_search(
+        db, query, account_email=account_email, folder=folder, limit=limit, kinds=kinds
+    )
+
+
+def corpus_keyword_search(
+    db: sqlite3.Connection,
+    query: str,
+    account_email: str | None = None,
+    folder: str | None = None,
+    limit: int = 50,
+    kinds: list[str] | None = None,
 ) -> list[int]:
     pattern = f"%{query}%"
     sql = """
-        SELECT m.id FROM messages m
-        JOIN accounts a ON a.id = m.account_id
+        SELECT c.id FROM corpus_items c
+        LEFT JOIN messages m ON m.id = c.id AND c.kind = 'email'
+        LEFT JOIN accounts a ON a.id = m.account_id
         WHERE (
-            m.subject LIKE ? OR m.from_addr LIKE ? OR m.body_text LIKE ?
-            OR m.body_for_embed LIKE ?
+            c.text_for_embed LIKE ? OR c.body_text LIKE ?
+            OR json_extract(c.payload, '$.subject') LIKE ?
+            OR json_extract(c.payload, '$.from_addr') LIKE ?
         )
     """
     params: list[Any] = [pattern, pattern, pattern, pattern]
+    if kinds:
+        placeholders = ",".join("?" for _ in kinds)
+        sql += f" AND c.kind IN ({placeholders})"
+        params.extend(kinds)
     if account_email:
-        sql += " AND a.email = ?"
+        sql += " AND c.kind = 'email' AND a.email = ?"
         params.append(account_email)
     if folder:
-        sql += " AND m.folder = ?"
+        sql += " AND c.kind = 'email' AND m.folder = ?"
         params.append(folder)
-    sql += " ORDER BY m.date DESC LIMIT ?"
+    sql += " ORDER BY c.occurred_at DESC LIMIT ?"
     params.append(limit)
     rows = db.execute(sql, params).fetchall()
     return [int(r[0]) for r in rows]
@@ -372,7 +703,9 @@ def update_message_flags(db: sqlite3.Connection, message_id: int, flags: list[st
 
 
 def delete_message(db: sqlite3.Connection, message_id: int) -> None:
-    db.execute("DELETE FROM message_vec WHERE rowid = ?", (message_id,))
+    table = _vec_table(db)
+    db.execute(f"DELETE FROM {table} WHERE rowid = ?", (message_id,))
+    db.execute("DELETE FROM corpus_items WHERE id = ?", (message_id,))
     db.execute("DELETE FROM messages WHERE id = ?", (message_id,))
 
 

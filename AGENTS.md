@@ -1,4 +1,4 @@
-# Agent onboarding — fish (IMAP email AI)
+# Agent onboarding — fish (personal PRISM corpus)
 
 > **Status**: Active at `/home/ken/ws/fish`. GitHub: [kenseehart/imap_sorting_hat](https://github.com/kenseehart/imap_sorting_hat).
 
@@ -8,61 +8,73 @@ Cross-project assets: **`/home/ken/ws/shared`**. Workspace index: **`/home/ken/w
 
 ## What this project is
 
-Multi-account IMAP email sync with RAG (1 message = 1 chunk), hybrid search, importance ranking, topic graphs, and a FastMCP server with full read/write mail operations.
+Personal knowledge corpus with PRISM retrieval:
 
-## Repo
+- **Email** — multi-account IMAP sync (1 message = 1 chunk)
+- **SMS** — Android Backup & Restore XML (default filter `(831)535-2442`)
+- **Chat** — ChatGPT / Claude.ai official export ZIPs (turn-level chunks)
+- **Memory** — agent-written facts (`fish_memory_upsert`); similar facts are reconciled by LLM (duplicate / merge / distinct)
 
-- Path: **`/home/ken/ws/fish`**
-- GitHub: [kenseehart/imap_sorting_hat](https://github.com/kenseehart/imap_sorting_hat)
+Storage: SQLite `~/.config/fish/fish.db` + **sqlite-vec** (`corpus_items` / `corpus_vec`). Optional PRISM adapters (`.prz` in `~/.config/fish/models/`). Session **context JSON** augments search and prompts — see [`docs/context.md`](docs/context.md).
 
 ## Architecture
 
-- **Sync**: `imapclient` → SQLite (`~/.config/fish/fish.db`) + **sqlite-vec** embeddings
-- **Accounts**: `~/.config/fish/accounts.yaml` (hosts, usernames, app passwords)
+- **Sync**: `imapclient` → `messages` + mirrored `corpus_items` (kind=email)
+- **Import**: `fish import-corpus` — SMS, ChatGPT, Claude — see [`docs/import-runbook.md`](docs/import-runbook.md)
+- **Search**: hybrid semantic + keyword + context boosts; PRISM query/chunk adapters when `FISH_PRISM_MODEL` set
 - **MCP (local)**: `python -m fish.mcp_server` — registered as `fish` in `.cursor/mcp.json`
-- **MCP (remote)**: `python -m fish.http_server` — OAuth pattern from `tesla/` for Claude mobile
-- **Legacy**: `ish.py` retired; parsing logic lives in `src/fish/parse.py`
+- **Training**: `fish prism-train` (labels pairs via OpenAI, trains adapters; needs `uv sync --extra prism` for torch)
 
 ## Setup
 
 ```bash
 cd /home/ken/ws/fish
 uv sync
-uv run python -m util.mkdo_setup
-mkdo fish -d .venv/bin
+mkdo fish -d ~/.local/bin -t global   # or project .venv
 
 mkdir -p ~/.config/fish
 cp config/accounts.yaml.example ~/.config/fish/accounts.yaml
-cp .env.example ~/.config/fish/fish.env   # OpenAI key only
-fish connect <email>                      # stores app password encrypted per account
+cp .env.example ~/.config/fish/fish.env
+fish connect <email>
 ```
 
 ## Commands
 
 | Command | Purpose |
 |---------|---------|
-| `fish connect <email>` | Interactive IMAP/SMTP setup for one account |
-| `fish search <query>` | Hybrid semantic + keyword search (`--limit`, `--account`, `--json`) |
-| `fish status` | Check config, IMAP connectivity, DB counts |
-| `fish sync` | Sync last 90 days from all accounts |
-| `fish backfill --since 2020-01-01` | Historical mail backfill |
-| `fish ignore` | List folders skipped during sync |
-| `fish ignore --add FOLDER` | Add folder to ignore list |
-| `fish folders [EMAIL]` | List IMAP folders and sync/ignore status |
+| `fish connect <email>` | Interactive IMAP/SMTP setup |
+| `fish search <query>` | Corpus search (`--kinds`, `--context`, `--account`, `--json`) |
+| `fish import-corpus <source> <path>` | Import `android-sms`, `chatgpt`, or `claude` |
+| `fish memory` / MCP | `fish_memory_upsert` for agent memories |
+| `fish embedding-get <id>` | Stored embedding vector for a corpus item |
+| `fish prism-train` | Train PRISM adapters → `~/.config/fish/models/personal.prz` |
+| `fish sync` | IMAP sync + embed |
+| `fish status` | Config, connectivity, corpus counts by kind |
 
 ## MCP tools
 
-Read: `fish_search`, `fish_message_get`, `fish_thread_get`, `fish_sync_status`, `fish_priority_inbox`, `fish_digest`, `fish_topics_*`, `fish_topic_graph`
+Read: `fish_search` (with `context_json`, `kinds`), `fish_corpus_get`, `fish_embedding_get`, `fish_message_get`, `fish_thread_get`, `fish_sync_status`, `fish_priority_inbox`, `fish_digest`, `fish_topics_*`, `fish_import`, `fish_memory_upsert`
 
 Write: `fish_sync_run`, `fish_message_move`, `fish_message_archive`, `fish_bulk_action`, `fish_compose`, `fish_send`
-
-All tools are `autoApprove` in Cursor — agent can archive/move/send without prompts.
 
 ## Config paths
 
 | File | Purpose |
 |------|---------|
-| `~/.config/fish/accounts.yaml` | IMAP/SMTP hosts and app passwords per mailbox |
-| `~/.config/fish/fish.env` | OpenAI API key |
-| `~/.config/fish/fish.db` | Messages + vectors |
-| `~/.config/fish/actions.log` | Bulk action audit log |
+| `~/.config/fish/accounts.yaml` | IMAP/SMTP accounts |
+| `~/.config/fish/fish.env` | `OPENAI_API_KEY`, optional `FISH_PRISM_MODEL` |
+| `~/.config/fish/fish.db` | Corpus + IMAP state |
+| `~/.config/fish/models/` | PRISM `.prz` files, classifiers |
+| `~/.config/fish/context_rules.yaml` | Context-based retrieval boosts |
+| `~/.config/fish/imports/` | Drop zone for export files |
+
+## PRISM
+
+Activate after training:
+
+```bash
+# fish.env
+FISH_PRISM_MODEL=personal.prz
+```
+
+Heavy training: RunPod `prism-train` per [`compute.yaml`](compute.yaml) and [`docs/deploy.md`](docs/deploy.md).

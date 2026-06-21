@@ -12,13 +12,19 @@ ACCOUNTS_PATH = CONFIG_DIR / "accounts.yaml"
 ENV_PATH = CONFIG_DIR / "fish.env"
 DB_PATH = CONFIG_DIR / "fish.db"
 MODELS_DIR = CONFIG_DIR / "models"
+IMPORTS_DIR = CONFIG_DIR / "imports"
 ACTIONS_LOG = CONFIG_DIR / "actions.log"
+MEMORY_DEDUP_THRESHOLD = 0.95
+MEMORY_MERGE_THRESHOLD = 0.85
+MEMORY_LLM_MODEL = "gpt-4o-mini"
 
 DEFAULT_SYNC_DAYS = 90
 DEFAULT_EMBED_MODEL = "text-embedding-3-small"
 EMBED_DIM = 1536
 MAX_EMBED_TOKENS = 8192
 MAX_EMBED_BODY_CHARS = 32_000
+# OpenAI embeddings API limit is 300k tokens/request; stay under with margin.
+EMBED_REQUEST_MAX_TOKENS = 250_000
 
 SKIP_FOLDER_PATTERNS = (
     "[Gmail]/Trash",
@@ -48,6 +54,7 @@ RECOMMENDED_IGNORE_FOLDERS = (
 def ensure_config_dir() -> Path:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
+    IMPORTS_DIR.mkdir(parents=True, exist_ok=True)
     return CONFIG_DIR
 
 
@@ -151,3 +158,23 @@ def ensure_openai_api_key(*, interactive: bool = True, force: bool = False) -> s
 def embedding_model() -> str:
     load_env()
     return os.getenv("FISH_EMBEDDING_MODEL", DEFAULT_EMBED_MODEL)
+
+
+def prism_model_path() -> Path | None:
+    load_env()
+    raw = os.getenv("FISH_PRISM_MODEL", "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = MODELS_DIR / raw
+    if not path.exists():
+        raise RuntimeError(
+            f"FISH_PRISM_MODEL is set to {raw!r} but file not found: {path}"
+        )
+    return path
+
+
+def memory_llm_model() -> str:
+    load_env()
+    return os.getenv("FISH_MEMORY_LLM_MODEL", MEMORY_LLM_MODEL)

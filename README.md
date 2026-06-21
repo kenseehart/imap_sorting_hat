@@ -1,21 +1,14 @@
 # fish (imap_sorting_hat)
 
-IMAP email sync, RAG, and MCP agent for multi-account mail.
+Personal PRISM corpus: IMAP email, SMS, chat exports, agent memories.
 
 ## Features
 
-- Sync 3 mailboxes (seehart, agi.green, gmail) via IMAP
-- One message = one RAG chunk in SQLite + sqlite-vec
-- Hybrid semantic + keyword search
-- Bulk archive/move/flag by natural-language query
-- Importance ranking, topic clusters, mind-map graph export
-- Compose and send via SMTP
-- FastMCP for Cursor; optional HTTP OAuth deploy for Claude mobile
+- Unified corpus in SQLite + sqlite-vec (`corpus_items` / `corpus_vec`)
+- IMAP sync (multi-account), hybrid search, PRISM dual-adapter retrieval
+- Import Android SMS, ChatGPT, Claude exports
+- Agent memory upsert with dedup
+- Session context JSON for query augmentation and prompt assembly
+- FastMCP for Cursor
 
-## Quick start
-
-See [AGENTS.md](AGENTS.md).
-
-## Status
-
-Replaces the 2022 `ish.py` prototype with a modern `uv` package under `src/fish/`.
+See [AGENTS.md](AGENTS.md), [docs/import-runbook.md](docs/import-runbook.md), [docs/context.md](docs/context.md).
