@@ -69,7 +69,12 @@ def get_qdrant_client() -> QdrantClient:
                 "Set FISH_QDRANT_URL (e.g. http://127.0.0.1:6333) "
                 "or FISH_QDRANT_PATH for embedded storage"
             )
-        client = QdrantClient(url=url, api_key=qdrant_api_key(), prefer_grpc=False)
+        client = QdrantClient(
+            url=url,
+            api_key=qdrant_api_key(),
+            prefer_grpc=False,
+            check_compatibility=False,
+        )
     # Probe connectivity
     client.get_collections()
     return client
