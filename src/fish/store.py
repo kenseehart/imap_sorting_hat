@@ -121,6 +121,16 @@ CREATE INDEX IF NOT EXISTS idx_corpus_kind ON corpus_items(kind);
 CREATE INDEX IF NOT EXISTS idx_corpus_occurred ON corpus_items(occurred_at);
 CREATE INDEX IF NOT EXISTS idx_corpus_source ON corpus_items(source);
 
+CREATE TABLE IF NOT EXISTS retrieval_models (
+    model_id TEXT PRIMARY KEY,
+    config_name TEXT NOT NULL,
+    vec_table TEXT NOT NULL UNIQUE,
+    prz_name TEXT,
+    created_at TEXT NOT NULL,
+    active INTEGER NOT NULL DEFAULT 0,
+    meta_json TEXT
+);
+
 CREATE TABLE IF NOT EXISTS training_queries (
     id INTEGER PRIMARY KEY,
     text TEXT NOT NULL,
@@ -132,6 +142,8 @@ CREATE TABLE IF NOT EXISTS training_queries (
     query_embedding BLOB,
     created_at TEXT NOT NULL,
     text_hash TEXT NOT NULL,
+    source TEXT,
+    meta_json TEXT,
     UNIQUE(text_hash, origin),
     FOREIGN KEY (parent_query_id) REFERENCES training_queries(id)
 );
@@ -202,8 +214,17 @@ def init_db() -> None:
         cols = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
         if "gmail_labels" not in cols:
             db.execute("ALTER TABLE messages ADD COLUMN gmail_labels TEXT")
+        tq_cols = {row[1] for row in db.execute("PRAGMA table_info(training_queries)")}
+        if "source" not in tq_cols:
+            db.execute("ALTER TABLE training_queries ADD COLUMN source TEXT")
+        if "meta_json" not in tq_cols:
+            db.execute("ALTER TABLE training_queries ADD COLUMN meta_json TEXT")
         _ensure_vec_table(db, "corpus_vec")
         _ensure_vec_table(db, "message_vec")
+        from fish.prism.registry import ensure_legacy_model, ensure_model_vec_tables
+
+        ensure_legacy_model(db)
+        ensure_model_vec_tables(db)
         _migrate_messages_to_corpus(db)
 
 
@@ -217,11 +238,32 @@ def _ensure_vec_table(db: sqlite3.Connection, name: str) -> None:
         )
 
 
-def _vec_table(db: sqlite3.Connection) -> str:
+def _raw_vec_table(db: sqlite3.Connection) -> str:
+    """ANN index of frozen OpenAI embeddings c (legacy / raw cosine).
+
+    Source of truth is ``retrieval_models`` for model_id=legacy (may be a
+    generation-suffixed table after wipe). Falls back to corpus_vec / message_vec.
+    """
+    from fish.prism.configs import LEGACY_MODEL_ID, LEGACY_VEC_TABLE
+
+    try:
+        from fish.prism.registry import get_retrieval_model
+
+        model = get_retrieval_model(db, LEGACY_MODEL_ID)
+        if model and model.get("vec_table"):
+            return str(model["vec_table"])
+    except sqlite3.OperationalError:
+        pass
     row = db.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='corpus_vec'"
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (LEGACY_VEC_TABLE,),
     ).fetchone()
-    return "corpus_vec" if row else "message_vec"
+    return LEGACY_VEC_TABLE if row else "message_vec"
+
+
+def _vec_table(db: sqlite3.Connection) -> str:
+    """Backward-compat alias: legacy raw ANN table."""
+    return _raw_vec_table(db)
 
 
 def _migrate_messages_to_corpus(db: sqlite3.Connection) -> None:
@@ -236,18 +278,9 @@ def _migrate_messages_to_corpus(db: sqlite3.Connection) -> None:
         rows = db.execute("SELECT * FROM messages").fetchall()
         for row in rows:
             _upsert_email_corpus_from_row(db, dict(row))
-    if _vec_table(db) == "corpus_vec":
-        legacy = db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='message_vec'"
-        ).fetchone()
-        if legacy:
-            copied = db.execute("SELECT COUNT(*) FROM corpus_vec").fetchone()[0]
-            if copied == 0:
-                for row in db.execute("SELECT rowid, embedding FROM message_vec").fetchall():
-                    db.execute(
-                        "INSERT INTO corpus_vec(rowid, embedding) VALUES (?, ?)",
-                        (int(row["rowid"]), row["embedding"]),
-                    )
+    # Historical message_vec → corpus_vec copy removed: never COUNT/scan huge
+    # sqlite-vec tables (hangs). Live DBs already completed that migration.
+
 
 
 def upsert_account(
@@ -414,7 +447,7 @@ def _upsert_email_corpus(
         preserve_embedded = existing["embedded_at"]
     elif existing and existing.get("embedded_at") and parsed.content_hash != existing.get("content_hash"):
         preserve_embedded = None
-        db.execute(f"DELETE FROM {_vec_table(db)} WHERE rowid = ?", (message_id,))
+        unindex_corpus_item(db, message_id)
     return upsert_corpus_item(db, item, item_id=message_id, embedded_at=preserve_embedded)
 
 
@@ -427,29 +460,60 @@ def upsert_corpus_item(
 ) -> int:
     now = _utcnow()
     embedded = embedded_at if embedded_at is not None else item.embedded_at
-    if item_id is not None:
+    existing_key = get_corpus_by_source_key(db, item.source_key)
+    if existing_key is not None:
+        db.execute(
+            """
+            UPDATE corpus_items SET
+                kind=?,
+                source=?,
+                text_for_embed=?,
+                body_text=?,
+                occurred_at=?,
+                content_hash=?,
+                payload=?,
+                tags=?,
+                embedded_at=CASE
+                    WHEN content_hash != ? THEN NULL
+                    ELSE COALESCE(embedded_at, ?)
+                END
+            WHERE source_key=?
+            """,
+            (
+                item.kind,
+                item.source,
+                item.text_for_embed,
+                item.body_text,
+                item.occurred_at,
+                item.content_hash_value,
+                json.dumps(item.payload),
+                json.dumps(item.tags),
+                item.content_hash_value,
+                embedded,
+                item.source_key,
+            ),
+        )
+        return int(existing_key["id"])
+
+    use_id = item_id
+    if use_id is not None:
+        existing_id = db.execute(
+            "SELECT id, source_key FROM corpus_items WHERE id = ?", (use_id,)
+        ).fetchone()
+        if existing_id is not None and existing_id["source_key"] != item.source_key:
+            # Primary-key collision with a different corpus row — allocate a new id.
+            use_id = None
+
+    if use_id is not None:
         db.execute(
             """
             INSERT INTO corpus_items (
                 id, kind, source, source_key, text_for_embed, body_text,
                 occurred_at, ingested_at, embedded_at, content_hash, payload, tags
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(source_key) DO UPDATE SET
-                kind=excluded.kind,
-                source=excluded.source,
-                text_for_embed=excluded.text_for_embed,
-                body_text=excluded.body_text,
-                occurred_at=excluded.occurred_at,
-                content_hash=excluded.content_hash,
-                payload=excluded.payload,
-                tags=excluded.tags,
-                embedded_at=CASE
-                    WHEN corpus_items.content_hash != excluded.content_hash THEN NULL
-                    ELSE COALESCE(corpus_items.embedded_at, excluded.embedded_at)
-                END
             """,
             (
-                item_id,
+                use_id,
                 item.kind,
                 item.source,
                 item.source_key,
@@ -463,41 +527,29 @@ def upsert_corpus_item(
                 json.dumps(item.tags),
             ),
         )
-    else:
-        db.execute(
-            """
-            INSERT INTO corpus_items (
-                kind, source, source_key, text_for_embed, body_text,
-                occurred_at, ingested_at, embedded_at, content_hash, payload, tags
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(source_key) DO UPDATE SET
-                kind=excluded.kind,
-                source=excluded.source,
-                text_for_embed=excluded.text_for_embed,
-                body_text=excluded.body_text,
-                occurred_at=excluded.occurred_at,
-                content_hash=excluded.content_hash,
-                payload=excluded.payload,
-                tags=excluded.tags,
-                embedded_at=CASE
-                    WHEN corpus_items.content_hash != excluded.content_hash THEN NULL
-                    ELSE COALESCE(corpus_items.embedded_at, excluded.embedded_at)
-                END
-            """,
-            (
-                item.kind,
-                item.source,
-                item.source_key,
-                item.text_for_embed,
-                item.body_text,
-                item.occurred_at,
-                now,
-                embedded,
-                item.content_hash_value,
-                json.dumps(item.payload),
-                json.dumps(item.tags),
-            ),
-        )
+        return use_id
+
+    db.execute(
+        """
+        INSERT INTO corpus_items (
+            kind, source, source_key, text_for_embed, body_text,
+            occurred_at, ingested_at, embedded_at, content_hash, payload, tags
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            item.kind,
+            item.source,
+            item.source_key,
+            item.text_for_embed,
+            item.body_text,
+            item.occurred_at,
+            now,
+            embedded,
+            item.content_hash_value,
+            json.dumps(item.payload),
+            json.dumps(item.tags),
+        ),
+    )
     row = db.execute(
         "SELECT id FROM corpus_items WHERE source_key = ?", (item.source_key,)
     ).fetchone()
@@ -542,15 +594,18 @@ def mark_memory_superseded(
         "UPDATE corpus_items SET payload = ? WHERE id = ?",
         (json.dumps(payload), item_id),
     )
-    table = _vec_table(db)
-    db.execute(f"DELETE FROM {table} WHERE rowid = ?", (item_id,))
+    unindex_corpus_item(db, item_id)
     mark_samples_superseded_for_corpus(db, item_id)
 
 
 def get_embedding(db: sqlite3.Connection, item_id: int) -> list[float] | None:
+    """Legacy / raw ANN embedding c (corpus_vec)."""
+    return _get_vec(db, _raw_vec_table(db), item_id)
+
+
+def _get_vec(db: sqlite3.Connection, table: str, item_id: int) -> list[float] | None:
     import numpy as np
 
-    table = _vec_table(db)
     row = db.execute(
         f"SELECT embedding FROM {table} WHERE rowid = ?", (item_id,)
     ).fetchone()
@@ -559,17 +614,58 @@ def get_embedding(db: sqlite3.Connection, item_id: int) -> list[float] | None:
     return np.frombuffer(row["embedding"], dtype=np.float32).tolist()
 
 
+def get_raw_embedding(db: sqlite3.Connection, item_id: int) -> list[float] | None:
+    """Frozen OpenAI embedding c from the legacy ANN index (sole copy)."""
+    return get_embedding(db, item_id)
+
+
+def get_model_embedding(
+    db: sqlite3.Connection, item_id: int, model_id: str
+) -> list[float] | None:
+    from fish.prism.registry import get_retrieval_model
+
+    model = get_retrieval_model(db, model_id)
+    if model is None:
+        raise KeyError(f"Unknown model_id {model_id!r}")
+    return _get_vec(db, model["vec_table"], item_id)
+
+
 def set_embedding(db: sqlite3.Connection, message_id: int, embedding: list[float]) -> None:
     set_corpus_embedding(db, message_id, embedding)
 
 
-def set_corpus_embedding(db: sqlite3.Connection, item_id: int, embedding: list[float]) -> None:
-    table = _vec_table(db)
+def _upsert_vec(db: sqlite3.Connection, table: str, item_id: int, embedding: list[float]) -> None:
     db.execute(f"DELETE FROM {table} WHERE rowid = ?", (item_id,))
     db.execute(
         f"INSERT INTO {table}(rowid, embedding) VALUES (?, ?)",
         (item_id, serialize_float32(embedding)),
     )
+
+
+def set_corpus_embedding(
+    db: sqlite3.Connection,
+    item_id: int,
+    embedding: list[float],
+    *,
+    model_embeddings: dict[str, list[float]] | None = None,
+) -> None:
+    """Write raw vector to legacy index; optional per-model Ac vectors.
+
+    ``embedding`` is always the frozen OpenAI raw c → corpus_vec.
+    ``model_embeddings`` maps model_id → Ac(c) for registered PRISM indexes.
+    """
+    from fish.prism.configs import LEGACY_MODEL_ID
+    from fish.prism.registry import get_retrieval_model, list_retrieval_models
+
+    _upsert_vec(db, _raw_vec_table(db), item_id, embedding)
+    extras = model_embeddings or {}
+    for model in list_retrieval_models(db):
+        mid = model["model_id"]
+        if mid == LEGACY_MODEL_ID:
+            continue
+        vec = extras.get(mid)
+        if vec is not None:
+            _upsert_vec(db, model["vec_table"], item_id, vec)
     now = _utcnow()
     db.execute(
         "UPDATE corpus_items SET embedded_at = ? WHERE id = ?",
@@ -581,13 +677,159 @@ def set_corpus_embedding(db: sqlite3.Connection, item_id: int, embedding: list[f
     )
 
 
+def set_model_embedding(
+    db: sqlite3.Connection,
+    item_id: int,
+    model_id: str,
+    embedding: list[float],
+) -> None:
+    from fish.prism.configs import LEGACY_MODEL_ID
+    from fish.prism.registry import get_retrieval_model
+
+    if model_id == LEGACY_MODEL_ID:
+        _upsert_vec(db, _raw_vec_table(db), item_id, embedding)
+        return
+    model = get_retrieval_model(db, model_id)
+    if model is None:
+        raise KeyError(f"Unknown model_id {model_id!r}")
+    _upsert_vec(db, model["vec_table"], item_id, embedding)
+
+
+def unindex_corpus_item(db: sqlite3.Connection, item_id: int) -> int:
+    """Remove item from every registered retrieval index."""
+    from fish.prism.registry import list_retrieval_models
+
+    n = 0
+    for model in list_retrieval_models(db):
+        db.execute(
+            f"DELETE FROM {model['vec_table']} WHERE rowid = ?", (item_id,)
+        )
+        n += 1
+    db.execute(
+        "UPDATE corpus_items SET embedded_at = NULL WHERE id = ?", (item_id,)
+    )
+    db.execute(
+        "UPDATE messages SET embedded_at = NULL WHERE id = ?", (item_id,)
+    )
+    return n
+
+
+def cleanup_index_orphans(db: sqlite3.Connection) -> dict[str, int]:
+    """Delete vec rows whose rowid is not a live corpus_items.id."""
+    from fish.prism.registry import list_retrieval_models
+
+    removed: dict[str, int] = {}
+    for model in list_retrieval_models(db):
+        table = model["vec_table"]
+        # Collect orphan rowids (vec0 may not support NOT IN subquery delete well)
+        try:
+            rows = db.execute(f"SELECT rowid FROM {table}").fetchall()
+        except sqlite3.OperationalError:
+            removed[model["model_id"]] = 0
+            continue
+        count = 0
+        for row in rows:
+            rid = int(row[0])
+            exists = db.execute(
+                "SELECT 1 FROM corpus_items WHERE id = ?", (rid,)
+            ).fetchone()
+            if not exists:
+                db.execute(f"DELETE FROM {table} WHERE rowid = ?", (rid,))
+                count += 1
+        removed[model["model_id"]] = count
+    return removed
+
+
+def wipe_all_vector_indexes(db: sqlite3.Connection) -> dict[str, str]:
+    """Discard all ANN indexes (corrupt recovery). Preserves corpus_items text.
+
+    Does **not** DROP/RENAME/COUNT huge sqlite-vec tables (those hang under load).
+    Retires each registered index by pointing ``retrieval_models.vec_table`` at a
+    fresh empty table; old vec tables remain as disk trash for offline cleanup.
+    """
+    from fish.prism.registry import list_retrieval_models
+
+    cleared: dict[str, str] = {}
+    stamp = _utcnow().replace(":", "").replace("-", "").replace("T", "")[:14]
+    for model in list_retrieval_models(db):
+        mid = model["model_id"]
+        old = model["vec_table"]
+        # Keep names short/safe for sqlite-vec
+        if mid == "legacy":
+            new = f"corpus_vec_g{stamp}"
+        else:
+            safe = mid.replace(".", "_").replace("-", "_")
+            new = f"corpus_vec__{safe}_g{stamp}"
+        _ensure_vec_table(db, new)
+        db.execute(
+            "UPDATE retrieval_models SET vec_table = ? WHERE model_id = ?",
+            (new, mid),
+        )
+        cleared[mid] = f"{old}->{new}"
+    # Do not mass-UPDATE embedded_at (slow on large DBs). Pending embeds are
+    # detected via missing rowids in the (new, empty) legacy vec table.
+    return cleared
+
+
+
+def list_corpus_with_raw_embedding(
+    db: sqlite3.Connection,
+    *,
+    kinds: list[str] | None = None,
+    limit: int | None = None,
+    like: list[str] | None = None,
+    since: str | None = None,
+) -> list[dict[str, Any]]:
+    """Items present in the legacy raw ANN index (eligible for PRISM re-index)."""
+    raw_table = _raw_vec_table(db)
+    sql = f"""
+        SELECT c.id, c.kind FROM corpus_items c
+        WHERE c.id IN (SELECT rowid FROM {raw_table})
+    """
+    params: list[Any] = []
+    if kinds:
+        placeholders = ",".join("?" for _ in kinds)
+        sql += f" AND c.kind IN ({placeholders})"
+        params.extend(kinds)
+    if since:
+        sql += " AND c.occurred_at >= ?"
+        params.append(since)
+    if like:
+        like_clauses = []
+        for pattern in like:
+            like_clauses.append(
+                "(ifnull(c.text_for_embed,'') LIKE ? OR ifnull(c.body_text,'') LIKE ?)"
+            )
+            params.extend([pattern, pattern])
+        sql += " AND (" + " OR ".join(like_clauses) + ")"
+    sql += " ORDER BY c.occurred_at DESC"
+    if limit is not None:
+        sql += " LIMIT ?"
+        params.append(limit)
+    rows = db.execute(sql, params).fetchall()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        raw = get_raw_embedding(db, int(row["id"]))
+        if not raw:
+            continue
+        out.append(
+            {"id": int(row["id"]), "kind": row["kind"], "raw_embedding": raw}
+        )
+    return out
+
+
 def count_messages_needing_embedding(db: sqlite3.Connection) -> int:
     return count_corpus_needing_embedding(db)
 
 
 def count_corpus_needing_embedding(db: sqlite3.Connection) -> int:
+    """Items missing a row in the legacy raw ANN index."""
+    raw_table = _raw_vec_table(db)
     row = db.execute(
-        "SELECT COUNT(*) FROM corpus_items WHERE embedded_at IS NULL"
+        f"""
+        SELECT COUNT(*) FROM corpus_items
+        WHERE id NOT IN (SELECT rowid FROM {raw_table})
+        """
     ).fetchone()
     return int(row[0])
 
@@ -596,16 +838,38 @@ def messages_needing_embedding(db: sqlite3.Connection, limit: int = 100) -> list
     return corpus_needing_embedding(db, limit=limit)
 
 
-def corpus_needing_embedding(db: sqlite3.Connection, limit: int = 100) -> list[dict[str, Any]]:
-    rows = db.execute(
-        """
+def corpus_needing_embedding(
+    db: sqlite3.Connection,
+    limit: int = 100,
+    *,
+    kinds: list[str] | None = None,
+    like: list[str] | None = None,
+    since: str | None = None,
+) -> list[dict[str, Any]]:
+    raw_table = _raw_vec_table(db)
+    sql = f"""
         SELECT id, text_for_embed FROM corpus_items
-        WHERE embedded_at IS NULL
-        ORDER BY occurred_at DESC
-        LIMIT ?
-        """,
-        (limit,),
-    ).fetchall()
+        WHERE id NOT IN (SELECT rowid FROM {raw_table})
+    """
+    params: list[Any] = []
+    if kinds:
+        placeholders = ",".join("?" for _ in kinds)
+        sql += f" AND kind IN ({placeholders})"
+        params.extend(kinds)
+    if since:
+        sql += " AND occurred_at >= ?"
+        params.append(since)
+    if like:
+        clauses = []
+        for pattern in like:
+            clauses.append(
+                "(ifnull(text_for_embed,'') LIKE ? OR ifnull(body_text,'') LIKE ?)"
+            )
+            params.extend([pattern, pattern])
+        sql += " AND (" + " OR ".join(clauses) + ")"
+    sql += " ORDER BY occurred_at DESC LIMIT ?"
+    params.append(limit)
+    rows = db.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -620,11 +884,19 @@ def corpus_vector_search(
     query_embedding: list[float],
     limit: int = 20,
     kinds: list[str] | None = None,
+    *,
+    model_id: str = "legacy",
 ) -> list[tuple[int, float]]:
+    """ANN search against the vec table for ``model_id`` (default legacy/raw)."""
+    from fish.prism.registry import get_retrieval_model
+
     k = int(limit)
     if k <= 0:
         raise ValueError(f"corpus_vector_search limit must be positive, got {limit!r}")
-    table = _vec_table(db)
+    model = get_retrieval_model(db, model_id)
+    if model is None:
+        raise KeyError(f"Unknown model_id {model_id!r}")
+    table = model["vec_table"]
     rows = db.execute(
         f"""
         SELECT rowid, distance
@@ -720,6 +992,25 @@ def update_sync_state(
         """,
         (account_id, folder, uidvalidity, last_uid, _utcnow(), since_date),
     )
+
+
+def get_sync_state(
+    db: sqlite3.Connection, account_id: int, folder: str
+) -> dict[str, Any] | None:
+    row = db.execute(
+        """
+        SELECT account_id, folder, uidvalidity, last_uid, last_sync_at, since_date
+        FROM sync_state
+        WHERE account_id = ? AND folder = ?
+        """,
+        (account_id, folder),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def newest_sync_at(db: sqlite3.Connection) -> str | None:
+    row = db.execute("SELECT MAX(last_sync_at) AS ts FROM sync_state").fetchone()
+    return row["ts"] if row and row["ts"] else None
 
 
 def sync_status(db: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -833,7 +1124,7 @@ def get_draft(db: sqlite3.Connection, draft_id: int) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-QueryOrigin = Literal["real", "synthetic"]
+QueryOrigin = Literal["real", "synthetic", "gold"]
 
 
 def normalize_query_text(text: str) -> str:
@@ -887,6 +1178,8 @@ def insert_training_query(
     synthesis_method: str | None = None,
     embed_model: str | None = None,
     query_embedding: list[float] | None = None,
+    source: str | None = None,
+    meta_json: str | None = None,
 ) -> int | None:
     """Insert a training query. Returns id, or None if duplicate."""
     now = _utcnow()
@@ -897,8 +1190,8 @@ def insert_training_query(
             """
             INSERT INTO training_queries (
                 text, origin, parent_query_id, context_json, synthesis_method,
-                embed_model, query_embedding, created_at, text_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                embed_model, query_embedding, created_at, text_hash, source, meta_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 text,
@@ -910,6 +1203,8 @@ def insert_training_query(
                 blob,
                 now,
                 thash,
+                source,
+                meta_json,
             ),
         )
         return int(cur.lastrowid)
@@ -921,6 +1216,30 @@ def get_training_query(db: sqlite3.Connection, query_id: int) -> dict[str, Any] 
     row = db.execute(
         "SELECT * FROM training_queries WHERE id = ?", (query_id,)
     ).fetchone()
+    return training_query_row_to_dict(row) if row else None
+
+
+def get_training_query_by_text(
+    db: sqlite3.Connection,
+    text: str,
+    *,
+    origin: QueryOrigin | None = "real",
+) -> dict[str, Any] | None:
+    thash = query_text_hash(text)
+    if origin is None:
+        row = db.execute(
+            "SELECT * FROM training_queries WHERE text_hash = ? ORDER BY id LIMIT 1",
+            (thash,),
+        ).fetchone()
+    else:
+        row = db.execute(
+            """
+            SELECT * FROM training_queries
+            WHERE text_hash = ? AND origin = ?
+            ORDER BY id LIMIT 1
+            """,
+            (thash, origin),
+        ).fetchone()
     return training_query_row_to_dict(row) if row else None
 
 
@@ -940,22 +1259,38 @@ def list_training_queries(
     db: sqlite3.Connection,
     *,
     origin: QueryOrigin | None = None,
+    source: str | None = None,
     limit: int | None = None,
     require_embedding: bool = False,
+    include_embeddings: bool = True,
 ) -> list[dict[str, Any]]:
     sql = "SELECT * FROM training_queries WHERE 1=1"
     params: list[Any] = []
     if origin:
         sql += " AND origin = ?"
         params.append(origin)
+    if source:
+        sql += " AND source = ?"
+        params.append(source)
     if require_embedding:
         sql += " AND query_embedding IS NOT NULL"
-    sql += " ORDER BY id"
+    sql += " ORDER BY created_at DESC, id DESC"
     if limit is not None:
         sql += " LIMIT ?"
-        params.append(limit)
+        params.append(int(limit))
     rows = db.execute(sql, params).fetchall()
-    return [training_query_row_to_dict(r) for r in rows]
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        data = training_query_row_to_dict(row)
+        if not include_embeddings:
+            data.pop("query_embedding", None)
+        if data.get("meta_json"):
+            try:
+                data["meta"] = json.loads(data["meta_json"])
+            except json.JSONDecodeError:
+                data["meta"] = None
+        out.append(data)
+    return out
 
 
 def pick_random_training_queries(

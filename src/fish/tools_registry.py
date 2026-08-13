@@ -12,6 +12,7 @@ from fish.bulk import bulk_action
 from fish.classifier import predict_labels, train_classifier
 from fish.config import DEFAULT_SYNC_DAYS
 from fish.context import ensure_default_context_rules
+from fish.freshness import FishAuthError, ensure_search_ready
 from fish.import_sources.runner import run_import
 from fish.memory import upsert_memory
 from fish.parse import message_row_to_dict
@@ -35,7 +36,11 @@ from fish.write_lock import FishWriteLockError
 
 FISH_INSTRUCTIONS = (
     "Fish provides read/write access to Ken's personal corpus: IMAP email, SMS, chat exports, "
-    "and agent memories. Search with fish_search (optional context_json). Use fish_bulk_action "
+    "and agent memories. fish_search automatically syncs mail when the corpus is stale and "
+    "FAILS LOUDLY on email auth errors (missing/invalid passwords) — do not invent results; "
+    "report the auth error and ask Ken to fix credentials on the fish host "
+    "(`fish connect <email>` or redeploy fish.env). "
+    "Search with fish_search (optional context_json). Use fish_bulk_action "
     "with dry_run=true first unless the user explicitly asked to proceed immediately."
 )
 
@@ -94,11 +99,27 @@ def register_tools(mcp: Any, as_json: bool = True, audit_decorator: Any = None) 
 
     @tool()
     def fish_sync_run(days: int = DEFAULT_SYNC_DAYS) -> Any:
-        """Sync mail from all configured accounts (default last 90 days)."""
+        """Sync mail from all configured accounts (default last 90 days). Fails with auth_error on credential problems."""
         try:
-            return out(sync_all(days=days))
+            results = sync_all(days=days, show_progress=False)
         except FishWriteLockError as exc:
-            return out({"error": str(exc)})
+            return out({"error": str(exc), "error_type": "lock", "fatal": True})
+        auth_failures = [
+            {"account": r.get("account"), "error": r.get("error")}
+            for r in results
+            if r.get("auth_error")
+        ]
+        payload: dict[str, Any] = {"results": results}
+        if auth_failures:
+            payload["error"] = (
+                "Email auth failed for: "
+                + ", ".join(f"{f['account']} ({f['error']})" for f in auth_failures)
+                + ". Run `fish connect <email>` on the fish host."
+            )
+            payload["error_type"] = "auth"
+            payload["fatal"] = True
+            payload["auth_failures"] = auth_failures
+        return out(payload)
 
     @tool()
     def fish_sync_status() -> Any:
@@ -116,20 +137,52 @@ def register_tools(mcp: Any, as_json: bool = True, audit_decorator: Any = None) 
         limit: int = 20,
         kinds: str | None = None,
         context_json: str | None = None,
+        sync_before_search: bool = True,
+        model_id: str | None = None,
+        since: str | None = None,
+        until: str | None = None,
+        from_contains: str | None = None,
     ) -> Any:
-        """Hybrid semantic + keyword search over the personal corpus (email, sms, chat, memory)."""
+        """ANN search (PRISM/legacy). Hard filters: since/until/from/account/folder/kinds/unread. No keyword hybrid."""
+        sync_meta: dict[str, Any] | None = None
+        if sync_before_search:
+            try:
+                sync_meta = ensure_search_ready(account_email=account_email)
+            except FishAuthError as exc:
+                return out(
+                    {
+                        "error": str(exc),
+                        "error_type": "auth",
+                        "fatal": True,
+                        "query": query,
+                    }
+                )
+            except Exception as exc:
+                return out(
+                    {
+                        "error": f"Sync before search failed: {exc}",
+                        "error_type": "sync",
+                        "fatal": True,
+                        "query": query,
+                    }
+                )
         kind_list = [k.strip() for k in kinds.split(",")] if kinds else None
-        return out(
-            search_corpus(
-                query,
-                kinds=kind_list,
-                context=context_json,
-                account_email=account_email,
-                folder=folder,
-                unread_only=unread_only,
-                limit=limit,
-            )
+        result = search_corpus(
+            query,
+            kinds=kind_list,
+            context=context_json,
+            account_email=account_email,
+            folder=folder,
+            unread_only=unread_only,
+            limit=limit,
+            model_id=model_id,
+            since=since,
+            until=until,
+            from_contains=from_contains,
         )
+        if sync_meta is not None:
+            result = {**result, "sync": sync_meta}
+        return out(result)
 
     @tool()
     def fish_message_get(message_id: int) -> Any:

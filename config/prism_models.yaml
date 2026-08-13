@@ -1,0 +1,21 @@
+# PRISM adapter training configs.
+# model_id = {config_name}.{UTC_timestamp}  →  models/{model_id}.prz
+#
+# Override or extend in ~/.config/fish/prism_models.yaml
+
+personal:
+  epochs: 5
+  lr: 2.0e-5
+  batch_size: 64
+  weight_decay: 0.01
+  residual_alpha_init: 0.9
+  # Dual residual MLP adapters (whitepaper); embed_dim follows FISH_EMBEDDING_MODEL
+  embed_dim: 1536
+
+smoke:
+  epochs: 3
+  lr: 2.0e-5
+  batch_size: 64
+  weight_decay: 0.01
+  residual_alpha_init: 0.9
+  embed_dim: 1536

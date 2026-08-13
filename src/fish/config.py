@@ -47,6 +47,11 @@ MEMORY_MERGE_THRESHOLD = 0.85
 MEMORY_LLM_MODEL = "gpt-4o-mini"
 
 DEFAULT_SYNC_DAYS = 90
+# On-demand sync before MCP/CLI search — keep the window short so tool calls finish.
+SEARCH_SYNC_DAYS = 14
+SEARCH_SYNC_MAX_AGE_SEC = 300
+SEARCH_SYNC_LOCK_TIMEOUT_SEC = 5.0
+SEARCH_SYNC_EMBED_BUDGET = 50
 DEFAULT_EMBED_MODEL = "text-embedding-3-small"
 EMBED_DIM = 1536
 MAX_EMBED_TOKENS = 8192
@@ -187,18 +192,35 @@ def embedding_model() -> str:
 
 
 def prism_model_path() -> Path | None:
+    """Resolve .prz from FISH_PRISM_MODEL (model_id or filename under models/)."""
     load_env()
     raw = os.getenv("FISH_PRISM_MODEL", "").strip()
     if not raw:
         return None
     path = Path(raw).expanduser()
     if not path.is_absolute():
-        path = models_dir() / raw
+        path = models_dir() / (raw if raw.endswith(".prz") else f"{raw}.prz")
     if not path.exists():
         raise RuntimeError(
             f"FISH_PRISM_MODEL is set to {raw!r} but file not found: {path}"
         )
     return path
+
+
+def active_prism_model_id() -> str | None:
+    """model_id for search: FISH_PRISM_MODEL env, else DB active flag."""
+    load_env()
+    raw = os.getenv("FISH_PRISM_MODEL", "").strip()
+    if raw:
+        name = Path(raw).name
+        return name[:-4] if name.endswith(".prz") else name
+    from fish.store import db_conn, init_db
+    from fish.prism.registry import active_prism_model
+
+    init_db()
+    with db_conn() as db:
+        active = active_prism_model(db)
+        return active["model_id"] if active else None
 
 
 def memory_llm_model() -> str:

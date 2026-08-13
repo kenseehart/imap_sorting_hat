@@ -10,7 +10,6 @@ from fish.accounts import Account, ignore_folders_for_account, load_accounts
 from fish.config import DEFAULT_SYNC_DAYS, ensure_openai_api_key
 from fish.write_lock import fish_write_lock
 from fish.embed import embed_texts, reset_client
-from fish.prism.inference import adapt_chunk_embedding
 from fish.imap_client import (
     ResilientImap,
     fetch_folder_messages,
@@ -20,11 +19,12 @@ from fish.imap_client import (
     search_uids_since_date,
     short_imap_error,
 )
-from fish.parse import parse_fetched_message, parse_raw_message
+from fish.parse import parse_fetched_message
 from fish.store import (
     count_corpus_needing_embedding,
     corpus_needing_embedding,
     db_conn,
+    get_sync_state,
     init_db,
     set_corpus_embedding,
     update_sync_state,
@@ -37,19 +37,35 @@ logger = logging.getLogger(__name__)
 EMBED_BATCH = 100
 
 
-def embed_pending(batch_size: int = EMBED_BATCH, *, auth_retry: bool = True) -> int:
+def embed_pending(
+    batch_size: int = EMBED_BATCH,
+    *,
+    auth_retry: bool = True,
+    kinds: list[str] | None = None,
+    like: list[str] | None = None,
+    since: str | None = None,
+) -> int:
     init_db()
     embedded = 0
     try:
         with db_conn() as db:
-            pending = corpus_needing_embedding(db, limit=batch_size)
+            pending = corpus_needing_embedding(
+                db, limit=batch_size, kinds=kinds, like=like, since=since
+            )
             if not pending:
                 return 0
             texts = [row["text_for_embed"] for row in pending]
             vectors = embed_texts(texts)
             for row, vector in zip(pending, vectors):
-                adapted = adapt_chunk_embedding(vector)
-                set_corpus_embedding(db, int(row["id"]), adapted)
+                from fish.config import active_prism_model_id
+                from fish.prism.configs import LEGACY_MODEL_ID
+                from fish.prism.inference import adapt_chunk_for_model
+
+                model_vecs: dict[str, list[float]] = {}
+                mid = active_prism_model_id()
+                if mid and mid != LEGACY_MODEL_ID:
+                    model_vecs[mid] = adapt_chunk_for_model(vector, mid)
+                set_corpus_embedding(db, int(row["id"]), vector, model_embeddings=model_vecs)
                 embedded += 1
     except AuthenticationError:
         if not auth_retry:
@@ -57,29 +73,54 @@ def embed_pending(batch_size: int = EMBED_BATCH, *, auth_retry: bool = True) -> 
         progress_write("OpenAI API key rejected — please re-enter.")
         reset_client()
         ensure_openai_api_key(interactive=True, force=True)
-        return embed_pending(batch_size=batch_size, auth_retry=False)
+        return embed_pending(
+            batch_size=batch_size,
+            auth_retry=False,
+            kinds=kinds,
+            like=like,
+            since=since,
+        )
     return embedded
 
 
-def embed_all_pending(*, show_progress: bool = True) -> int:
+def embed_all_pending(
+    *,
+    show_progress: bool = True,
+    max_messages: int | None = None,
+    kinds: list[str] | None = None,
+    like: list[str] | None = None,
+    since: str | None = None,
+) -> int:
     init_db()
-    with db_conn() as db:
-        total = count_corpus_needing_embedding(db)
-    if total == 0:
-        return 0
+    # Never COUNT(*) against a huge legacy vec table when scoped — that hangs.
+    # Unfiltered full-corpus embeds still need a total for the progress bar.
+    scoped = bool(kinds or like or since or max_messages is not None)
+    if scoped:
+        total = max_messages if max_messages is not None else 0
+    else:
+        with db_conn() as db:
+            total = count_corpus_needing_embedding(db)
+        if total == 0:
+            return 0
 
     embedded = 0
     bar = progress_bar(
-        total=total,
+        total=total or None,
         desc="embedding",
         unit="msg",
         disable=not show_progress,
     )
     while True:
-        count = embed_pending(batch_size=EMBED_BATCH)
+        remaining = None if max_messages is None else max(0, max_messages - embedded)
+        if remaining == 0:
+            break
+        batch = EMBED_BATCH if remaining is None else min(EMBED_BATCH, remaining)
+        count = embed_pending(
+            batch_size=batch, kinds=kinds, like=like, since=since
+        )
         embedded += count
         bar.update(count)
-        if count < EMBED_BATCH:
+        if count < batch:
             break
     bar.close()
     return embedded
@@ -95,8 +136,9 @@ def _sync_one_folder(
     stats: dict,
     *,
     show_progress: bool,
+    incremental: bool = True,
 ) -> dict:
-    folder_stats: dict = {"uids": 0, "stored": 0}
+    folder_stats: dict = {"uids": 0, "stored": 0, "skipped_existing": 0}
     imap = ResilientImap(account)
     try:
         if since:
@@ -107,10 +149,27 @@ def _sync_one_folder(
             uids = imap.with_retry(
                 lambda c: search_uids_since(c, folder, days), folder=folder
             )
-        folder_stats["uids"] = len(uids)
         uidvalidity = imap.with_retry(
             lambda c: folder_uidvalidity(c, folder), folder=folder
         )
+
+        prev_last_uid: int | None = None
+        if incremental:
+            with db_conn() as db:
+                state = get_sync_state(db, account_db_id, folder)
+            if (
+                state
+                and state.get("uidvalidity") is not None
+                and uidvalidity is not None
+                and int(state["uidvalidity"]) == int(uidvalidity)
+                and state.get("last_uid") is not None
+            ):
+                prev_last_uid = int(state["last_uid"])
+                before = len(uids)
+                uids = [u for u in uids if int(u) > prev_last_uid]
+                folder_stats["skipped_existing"] = before - len(uids)
+
+        folder_stats["uids"] = len(uids)
 
         msg_bar = progress_bar(
             total=len(uids),
@@ -141,13 +200,14 @@ def _sync_one_folder(
         )
         msg_bar.close()
 
+        new_last_uid = max((int(u) for u in uids), default=prev_last_uid)
         with db_conn() as db:
             update_sync_state(
                 db,
                 account_db_id,
                 folder,
                 uidvalidity,
-                max(uids) if uids else None,
+                new_last_uid,
                 since_label,
             )
     finally:
@@ -163,17 +223,35 @@ def sync_account(
     folders: list[str] | None = None,
     *,
     show_progress: bool = True,
+    incremental: bool = True,
+    embed_budget: int | None = None,
 ) -> dict:
     init_db()
-    stats = {"account": account.email, "folders": {}, "fetched": 0, "new_or_changed": 0, "embedded": 0}
+    stats = {
+        "account": account.email,
+        "folders": {},
+        "fetched": 0,
+        "new_or_changed": 0,
+        "embedded": 0,
+        "skipped_existing": 0,
+    }
     skip = ignore_folders_for_account(account)
     since_label = since.isoformat() if since else f"{days}d"
 
     try:
+        # Surface missing credentials before IMAP work.
+        _ = account.password
         all_folders = folders or list_folders(account)
     except Exception as exc:
-        progress_write(f"ERROR {account.email}: cannot list folders — {short_imap_error(exc)}")
-        stats["error"] = str(exc)
+        err = short_imap_error(exc) if not isinstance(exc, RuntimeError) else str(exc)
+        progress_write(f"ERROR {account.email}: {err}")
+        stats["error"] = err
+        stats["auth_error"] = (
+            "No password stored" in err
+            or "authentication" in err.lower()
+            or "authenticate" in err.lower()
+            or "invalid credentials" in err.lower()
+        )
         return stats
 
     target_folders = [f for f in all_folders if f not in skip]
@@ -207,16 +285,28 @@ def sync_account(
                 since_label,
                 stats,
                 show_progress=show_progress,
+                incremental=incremental,
             )
             stats["fetched"] += folder_stats["uids"]
+            stats["skipped_existing"] += folder_stats.get("skipped_existing", 0)
             stats["folders"][folder] = folder_stats
         except Exception as exc:
             err = short_imap_error(exc)
             logger.warning("Sync failed for %s %s: %s", account.email, folder, err)
             progress_write(f"WARN {account.email} / {folder}: {err}")
-            stats["folders"][folder] = {"error": err}
+            folder_err = {"error": err}
+            if (
+                "authentication" in err.lower()
+                or "authenticate" in err.lower()
+                or "invalid credentials" in err.lower()
+            ):
+                stats["auth_error"] = True
+                folder_err["auth_error"] = True
+            stats["folders"][folder] = folder_err
 
-    stats["embedded"] = embed_all_pending(show_progress=show_progress)
+    stats["embedded"] = embed_all_pending(
+        show_progress=show_progress, max_messages=embed_budget
+    )
     return stats
 
 
@@ -226,6 +316,9 @@ def sync_all(
     *,
     account: str | None = None,
     show_progress: bool = True,
+    incremental: bool = True,
+    embed_budget: int | None = None,
+    lock_timeout_sec: float | None = None,
 ) -> list[dict]:
     results = []
     accounts = load_accounts()
@@ -234,7 +327,8 @@ def sync_all(
         if not accounts:
             raise ValueError(f"No matching account: {account}")
 
-    with fish_write_lock("sync"):
+    timeout = 86_400.0 if lock_timeout_sec is None else lock_timeout_sec
+    with fish_write_lock("sync", timeout_sec=timeout):
         with progress_session(disable=not show_progress):
             account_bar = progress_bar(
                 accounts,
@@ -245,6 +339,13 @@ def sync_all(
             for acct in account_bar:
                 account_bar.set_postfix_str(acct.email, refresh=False)
                 results.append(
-                    sync_account(acct, days=days, since=since, show_progress=show_progress)
+                    sync_account(
+                        acct,
+                        days=days,
+                        since=since,
+                        show_progress=show_progress,
+                        incremental=incremental,
+                        embed_budget=embed_budget,
+                    )
                 )
     return results

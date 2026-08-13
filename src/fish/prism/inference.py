@@ -2,30 +2,32 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
-from fish.config import models_dir, prism_model_path
+from fish.config import models_dir
+from fish.prism.configs import LEGACY_MODEL_ID
 from fish.prism.model import PrismModel, load_prz, new_identity_model
 
 
 @lru_cache(maxsize=1)
 def _loaded_model() -> PrismModel | None:
-    path = prism_model_path()
-    if path is None:
+    from fish.config import active_prism_model_id
+
+    mid = active_prism_model_id()
+    if not mid or mid == LEGACY_MODEL_ID:
         return None
-    return load_prz(path)
-
-
-def clear_model_cache() -> None:
-    _loaded_model.cache_clear()
-    _loaded_model_by_path.cache_clear()
+    return load_prism_model(mid)
 
 
 @lru_cache(maxsize=8)
 def _loaded_model_by_path(path: str) -> PrismModel:
     return load_prz(Path(path))
+
+
+def clear_model_cache() -> None:
+    _loaded_model.cache_clear()
+    _loaded_model_by_path.cache_clear()
 
 
 def prism_model_path_for_stem(stem: str) -> Path:
@@ -39,6 +41,7 @@ def prism_model_path_for_stem(stem: str) -> Path:
 
 
 def load_prism_model(stem: str) -> PrismModel:
+    """Load by model_id or prz stem (e.g. personal.20260813T120000Z)."""
     return _loaded_model_by_path(str(prism_model_path_for_stem(stem)))
 
 
@@ -60,6 +63,20 @@ def adapt_chunk_embedding(vec: list[float]) -> list[float]:
         return vec
     adapted = model.adapt_chunk(vec)
     return adapted.astype(np.float32).tolist()
+
+
+def adapt_chunk_for_model(vec: list[float], model_id: str) -> list[float]:
+    if model_id == LEGACY_MODEL_ID:
+        return vec
+    model = load_prism_model(model_id)
+    return model.adapt_chunk(vec).astype(np.float32).tolist()
+
+
+def adapt_query_for_model(vec: list[float], model_id: str) -> list[float]:
+    if model_id == LEGACY_MODEL_ID:
+        return vec
+    model = load_prism_model(model_id)
+    return model.adapt_query(vec).astype(np.float32).tolist()
 
 
 def cosine_similarity(a: list[float], b: list[float]) -> float:

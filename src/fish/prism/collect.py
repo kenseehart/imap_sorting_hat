@@ -31,9 +31,20 @@ def get_raw_chunk_embedding(
     item_id: int,
     text_for_embed: str,
     cache: dict[int, list[float]],
+    db: Any | None = None,
 ) -> list[float]:
     if item_id not in cache:
-        cache[item_id] = embed_text(text_for_embed)
+        stored = None
+        if db is not None:
+            from fish.store import get_raw_embedding
+
+            stored = get_raw_embedding(db, item_id)
+        else:
+            from fish.store import db_conn, get_raw_embedding
+
+            with db_conn() as conn:
+                stored = get_raw_embedding(conn, item_id)
+        cache[item_id] = stored if stored is not None else embed_text(text_for_embed)
     return cache[item_id]
 
 
@@ -50,12 +61,16 @@ def retrieve_top_k(
     candidate_k = max(top_k * 5, top_k)
     if retriever == "legacy":
         search_vec = query_embedding
+        search_model_id = "legacy"
     else:
         if prism_model is None:
             prism_model = load_prism_model(retriever)
         search_vec = prism_model.adapt_query(query_embedding).tolist()
+        search_model_id = retriever
 
-    hits = corpus_vector_search(db, search_vec, limit=candidate_k)
+    hits = corpus_vector_search(
+        db, search_vec, limit=candidate_k, model_id=search_model_id
+    )
     scored: list[tuple[int, float]] = []
     for item_id, _dist in hits:
         row = get_corpus_by_id(db, item_id)
@@ -64,7 +79,7 @@ def retrieve_top_k(
         text = row.get("text_for_embed") or ""
         if not text:
             continue
-        raw_c = get_raw_chunk_embedding(item_id, text, raw_cache)
+        raw_c = get_raw_chunk_embedding(item_id, text, raw_cache, db)
         if retriever == "legacy":
             sim = cosine_similarity(query_embedding, raw_c)
         else:
@@ -120,7 +135,7 @@ def collect_samples(
                 if not corpus:
                     continue
                 text = corpus.get("text_for_embed") or ""
-                raw_c = get_raw_chunk_embedding(item_id, text, raw_cache)
+                raw_c = get_raw_chunk_embedding(item_id, text, raw_cache, db)
                 sample_id = insert_training_sample(
                     db,
                     query_id=int(query_row["id"]),

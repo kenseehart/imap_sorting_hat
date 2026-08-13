@@ -1,14 +1,15 @@
+"""Corpus search — PRISM / legacy ANN with hard metadata filters (no hybrid ranking)."""
+
 from __future__ import annotations
 
 import json
 from typing import Any
 
-from fish.context import augment_query, compute_context_boosts, parse_context
+from fish.context import augment_query, parse_context
 from fish.corpus import corpus_row_to_dict
 from fish.embed import embed_text
-from fish.prism.inference import adapt_query_embedding
+from fish.prism.inference import adapt_query_for_model
 from fish.store import (
-    corpus_keyword_search,
     corpus_vector_search,
     db_conn,
     get_corpus_by_id,
@@ -17,31 +18,21 @@ from fish.store import (
 )
 
 
-def _merge_scores(
-    vector_hits: list[tuple[int, float]],
-    keyword_ids: list[int],
-    vector_weight: float = 0.7,
-    context_boosts: dict[int, float] | None = None,
-) -> list[tuple[int, float]]:
-    scores: dict[int, float] = {}
-    boosts = context_boosts or {}
-    if vector_hits:
-        max_dist = max((d for _, d in vector_hits), default=1.0) or 1.0
-        for item_id, dist in vector_hits:
-            sim = 1.0 - (dist / max_dist)
-            scores[item_id] = scores.get(item_id, 0.0) + sim * vector_weight
-    for item_id in keyword_ids:
-        scores[item_id] = scores.get(item_id, 0.0) + (1.0 - vector_weight)
-    for item_id, boost in boosts.items():
-        scores[item_id] = scores.get(item_id, 0.0) + boost
-    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+def _payload(row: dict[str, Any]) -> dict[str, Any]:
+    payload = row.get("payload") or {}
+    if isinstance(payload, str):
+        try:
+            return json.loads(payload)
+        except json.JSONDecodeError:
+            return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _item_to_result(row: dict[str, Any], score: float) -> dict[str, Any]:
     item = corpus_row_to_dict(row)
     item["score"] = round(score, 4)
     if item.get("kind") == "email":
-        payload = item.get("payload") or {}
+        payload = _payload(item)
         item["subject"] = payload.get("subject")
         item["from_addr"] = payload.get("from_addr")
         item["account_email"] = payload.get("account_email")
@@ -49,6 +40,51 @@ def _item_to_result(row: dict[str, Any], score: float) -> dict[str, Any]:
         item["date"] = item.get("occurred_at")
         item["flags"] = payload.get("flags", [])
     return item
+
+
+def _passes_metadata_filters(
+    row: dict[str, Any],
+    *,
+    kinds: list[str] | None,
+    since: str | None,
+    until: str | None,
+    from_contains: str | None,
+    account_email: str | None,
+    folder: str | None,
+    unread_only: bool,
+) -> bool:
+    if not memory_is_active(row):
+        return False
+    if kinds and row.get("kind") not in kinds:
+        return False
+    occurred = (row.get("occurred_at") or "")[:32]
+    if since and (not occurred or occurred < since):
+        return False
+    if until and occurred and occurred > until:
+        return False
+
+    payload = _payload(row)
+    kind = row.get("kind")
+    if kind != "email":
+        # Email-only filters reject non-email rows
+        if from_contains or account_email or folder or unread_only:
+            return False
+        return True
+
+    if account_email and payload.get("account_email") != account_email:
+        return False
+    if folder and payload.get("folder") != folder:
+        return False
+    if from_contains:
+        needle = from_contains.lower()
+        frm = (payload.get("from_addr") or "").lower()
+        if needle not in frm:
+            return False
+    if unread_only:
+        flags = payload.get("flags") or []
+        if "\\Seen" in flags:
+            return False
+    return True
 
 
 def search_corpus(
@@ -59,8 +95,25 @@ def search_corpus(
     folder: str | None = None,
     unread_only: bool = False,
     limit: int = 20,
+    *,
+    model_id: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    from_contains: str | None = None,
+    # Deprecated: ignored. Hybrid keyword ranking removed.
+    keyword: bool | None = None,
+    vector_weight: float | None = None,
 ) -> dict[str, Any]:
-    """Hybrid semantic + keyword search over the unified corpus."""
+    """ANN search (PRISM adapted cosine when a model is active).
+
+    Ranking is pure vector distance — no keyword hybrid and no score weighting.
+    Metadata filters (since/until/from/account/folder/kinds/unread) are hard
+    constraints applied after ANN (with over-fetch to fill ``limit``).
+    """
+    if keyword is not None or vector_weight is not None:
+        # Accept old kwargs for callers; do not blend.
+        pass
+
     init_db()
     ctx = parse_context(context)
     augmented = augment_query(query, ctx)
@@ -69,63 +122,62 @@ def search_corpus(
 
     ctx_json = json.dumps(ctx) if ctx else None
     log_real_query(query, ctx_json, query_embedding=raw_query_embedding)
-    with db_conn() as db:
-        query_embedding = adapt_query_embedding(raw_query_embedding)
-        vector_hits = corpus_vector_search(
-            db, query_embedding, limit=limit, kinds=kinds
-        )
-        keyword_ids = corpus_keyword_search(
-            db,
-            query,
-            account_email=account_email,
-            folder=folder,
-            limit=limit * 3,
-            kinds=kinds,
-        )
-        boosts: dict[int, float] = {}
-        candidate_ids = {i for i, _ in vector_hits} | set(keyword_ids)
-        for item_id in candidate_ids:
-            row = get_corpus_by_id(db, item_id)
-            if not row or not memory_is_active(row):
-                continue
-            tags = row.get("tags")
-            if isinstance(tags, str):
-                try:
-                    tags = json.loads(tags)
-                except json.JSONDecodeError:
-                    tags = []
-            boost = compute_context_boosts(ctx, kind=row["kind"], tags=tags or [])
-            if boost:
-                boosts[item_id] = boost
-        merged = _merge_scores(vector_hits, keyword_ids, context_boosts=boosts)[:limit]
 
-        results = []
-        for item_id, score in merged:
+    filters_active = bool(
+        kinds
+        or since
+        or until
+        or from_contains
+        or account_email
+        or folder
+        or unread_only
+    )
+    # Over-fetch when filtering so we can still return ``limit`` matches
+    fetch_k = limit * 10 if filters_active else limit
+    fetch_k = max(fetch_k, limit)
+
+    with db_conn() as db:
+        from fish.config import active_prism_model_id
+        from fish.prism.configs import LEGACY_MODEL_ID
+
+        mid = model_id or active_prism_model_id()
+        if mid and mid != LEGACY_MODEL_ID:
+            query_embedding = adapt_query_for_model(raw_query_embedding, mid)
+            search_model_id = mid
+        else:
+            query_embedding = raw_query_embedding
+            search_model_id = LEGACY_MODEL_ID
+
+        # kinds filtered in Python with other metadata (avoid double filter path)
+        vector_hits = corpus_vector_search(
+            db,
+            query_embedding,
+            limit=fetch_k,
+            kinds=None,
+            model_id=search_model_id,
+        )
+
+        results: list[dict[str, Any]] = []
+        for item_id, dist in vector_hits:
             row = get_corpus_by_id(db, item_id)
             if not row:
                 continue
-            if not memory_is_active(row):
+            if not _passes_metadata_filters(
+                row,
+                kinds=kinds,
+                since=since,
+                until=until,
+                from_contains=from_contains,
+                account_email=account_email,
+                folder=folder,
+                unread_only=unread_only,
+            ):
                 continue
-            if account_email and row.get("kind") == "email":
-                payload = row.get("payload") or {}
-                if isinstance(payload, str):
-                    payload = json.loads(payload)
-                if payload.get("account_email") != account_email:
-                    continue
-            if folder and row.get("kind") == "email":
-                payload = row.get("payload") or {}
-                if isinstance(payload, str):
-                    payload = json.loads(payload)
-                if payload.get("folder") != folder:
-                    continue
-            if unread_only and row.get("kind") == "email":
-                payload = row.get("payload") or {}
-                if isinstance(payload, str):
-                    payload = json.loads(payload)
-                flags = payload.get("flags") or []
-                if "\\Seen" in flags:
-                    continue
+            # Lower distance = closer; expose as similarity-ish score for display
+            score = 1.0 / (1.0 + float(dist))
             results.append(_item_to_result(row, score))
+            if len(results) >= limit:
+                break
 
         prompt = None
         if ctx:
@@ -136,6 +188,16 @@ def search_corpus(
         return {
             "query": query,
             "context": ctx,
+            "model_id": search_model_id,
+            "filters": {
+                "kinds": kinds,
+                "since": since,
+                "until": until,
+                "from": from_contains,
+                "account_email": account_email,
+                "folder": folder,
+                "unread_only": unread_only,
+            },
             "results": results,
             "prompt": prompt,
         }
@@ -149,6 +211,12 @@ def search_messages(
     limit: int = 20,
     kinds: list[str] | None = None,
     context: dict[str, Any] | str | None = None,
+    *,
+    model_id: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    from_contains: str | None = None,
+    keyword: bool | None = None,
 ) -> list[dict[str, Any]]:
     """Backward-compatible wrapper returning result list only."""
     kinds = kinds or ["email"]
@@ -160,5 +228,9 @@ def search_messages(
         folder=folder,
         unread_only=unread_only,
         limit=limit,
+        model_id=model_id,
+        since=since,
+        until=until,
+        from_contains=from_contains,
     )
     return payload["results"]

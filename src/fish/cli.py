@@ -100,11 +100,23 @@ def search(
     unread_only: bool = optarg(
         False, long_flag="--unread", action="store_true", help="Unread messages only"
     ),
-    limit: int = optarg(20, long_flag="--limit", help="Max results (use 100+ for exhaustive topic search)"),
+    limit: int = optarg(20, long_flag="--limit", help="Max results"),
     kinds: str | None = optarg(
         None,
         long_flag="--kinds",
         help="Comma-separated corpus kinds: email,sms,chat,memory",
+    ),
+    since: str | None = optarg(
+        None, long_flag="--since", help="occurred_at >= ISO date (e.g. 2026-07-16)"
+    ),
+    until: str | None = optarg(
+        None, long_flag="--until", help="occurred_at <= ISO datetime"
+    ),
+    from_addr: str | None = optarg(
+        None,
+        long_flag="--from",
+        dest="from_addr",
+        help="Substring match on from_addr (email)",
     ),
     context_json: str | None = optarg(
         None,
@@ -112,17 +124,39 @@ def search(
         dest="context_json",
         help="Session context JSON string for query augmentation",
     ),
+    no_sync: bool = optarg(
+        False,
+        long_flag="--no-sync",
+        action="store_true",
+        help="Skip auto-sync-before-search",
+    ),
+    model_id: str | None = optarg(
+        None,
+        long_flag="--model-id",
+        help="Retrieval model_id (default: active PRISM or legacy)",
+    ),
     *,
     json_output: bool = False,
     md_output: bool = False,
 ) -> int:
-    """Hybrid semantic + keyword search over the personal corpus."""
+    """ANN search (PRISM/legacy). Hard metadata filters; no keyword hybrid ranking."""
+    from fish.freshness import FishAuthError, ensure_search_ready
+
     load_env()
     try:
         ensure_openai_api_key(interactive=False)
     except RuntimeError as exc:
         print(exc, file=sys.stderr)
         return 1
+    if not no_sync:
+        try:
+            ensure_search_ready(account_email=account)
+        except FishAuthError as exc:
+            print(exc, file=sys.stderr)
+            return 2
+        except Exception as exc:
+            print(f"Sync before search failed: {exc}", file=sys.stderr)
+            return 1
     kind_list = [k.strip() for k in kinds.split(",")] if kinds else None
     try:
         payload = search_corpus(
@@ -133,6 +167,10 @@ def search(
             folder=folder,
             unread_only=unread_only,
             limit=limit,
+            model_id=model_id,
+            since=since,
+            until=until,
+            from_contains=from_addr,
         )
         results = payload["results"]
     except Exception as exc:
@@ -147,6 +185,7 @@ def search(
                 "kind": r.get("kind"),
                 "score": r.get("score"),
                 "date": (r.get("occurred_at") or r.get("date") or "")[:10],
+                "from": (r.get("from_addr") or "")[:40],
                 "account": r.get("account_email"),
                 "subject": (r.get("subject") or r.get("body_text") or "")[:100],
             }
@@ -159,6 +198,41 @@ def search(
             title=f'Fish search: "{query}" ({len(results)} results)',
         )
     return 0
+
+
+@cmd(output=True)
+def get(
+    item_id: int,
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """Get a corpus item (or email message) by id."""
+    from fish.parse import message_row_to_dict
+    from fish.store import (
+        db_conn,
+        get_corpus_by_id,
+        get_message_by_id,
+        init_db,
+    )
+
+    init_db()
+    with db_conn() as db:
+        row = get_corpus_by_id(db, item_id)
+        if row:
+            emit_output(row, json_output=json_output, md=md_output, title=f"Corpus {item_id}")
+            return 0
+        msg = get_message_by_id(db, item_id)
+        if not msg:
+            print(f"Item {item_id} not found", file=sys.stderr)
+            return 1
+        acct = db.execute(
+            "SELECT email FROM accounts WHERE id = ?", (msg["account_id"],)
+        ).fetchone()
+        item = message_row_to_dict(msg)
+        item["account_email"] = acct["email"] if acct else None
+        emit_output(item, json_output=json_output, md=md_output, title=f"Message {item_id}")
+        return 0
 
 
 @cmd(output=True)
@@ -207,9 +281,12 @@ def import_corpus(
 
 @cmd(output=True)
 def prism_train(
-    epochs: int = optarg(5, long_flag="--epochs", help="Training epochs"),
+    config: str = optarg(
+        "personal", long_flag="--config", help="PRISM config name from prism_models.yaml"
+    ),
+    epochs: int | None = optarg(None, long_flag="--epochs", help="Override config epochs"),
     output: str | None = optarg(
-        None, long_flag="--output", help="Output .prz path (default ~/.config/fish/models/personal.prz)"
+        None, long_flag="--output", help="Output .prz path (default models/{model_id}.prz)"
     ),
     retriever: str | None = optarg(
         None,
@@ -238,19 +315,15 @@ def prism_train(
     json_output: bool = False,
     md_output: bool = False,
 ) -> int:
-    """Train PRISM adapters from labeled training samples and save .prz model."""
+    """Train PRISM adapters → {config}.{timestamp}.prz and register in retrieval_models."""
     from pathlib import Path
 
     from fish.prism.train import train_from_corpus
 
     load_env()
     try:
-        ensure_openai_api_key(interactive=True)
-    except RuntimeError as exc:
-        print(exc, file=sys.stderr)
-        return 1
-    try:
         result = train_from_corpus(
+            config_name=config,
             epochs=epochs,
             output=Path(output) if output else None,
             retriever=retriever,
@@ -264,6 +337,80 @@ def prism_train(
         print(exc, file=sys.stderr)
         return 1
     emit_output(result, json_output=json_output, md=md_output, title="Fish PRISM training")
+    return 0
+
+
+@cmd(output=True)
+def prism_reembed(
+    model_id: str | None = optarg(
+        None, long_flag="--model-id", help="PRISM model_id (default: active)"
+    ),
+    kinds: str | None = optarg(
+        None,
+        long_flag="--kinds",
+        help="Comma-separated kinds to re-index (default: all with raw vectors)",
+    ),
+    limit: int | None = optarg(
+        None, long_flag="--limit", help="Max items (smoke test)"
+    ),
+    like: str | None = optarg(
+        None,
+        long_flag="--like",
+        help="Comma-separated SQL LIKE patterns on text (smoke-test filter)",
+    ),
+    since: str | None = optarg(
+        None, long_flag="--since", help="Only items with occurred_at >= ISO date"
+    ),
+    no_progress: bool = optarg(
+        False, long_flag="--no-progress", action="store_true", help="Disable progress bars"
+    ),
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """Re-index a PRISM model's ANN from legacy corpus_vec (no OpenAI)."""
+    from fish.prism.reembed import prism_reembed as run_reembed
+
+    load_env()
+    kind_list = [k.strip() for k in kinds.split(",")] if kinds else None
+    like_list = [p.strip() for p in like.split(",") if p.strip()] if like else None
+    try:
+        result = run_reembed(
+            model_id=model_id,
+            kinds=kind_list,
+            show_progress=not no_progress,
+            limit=limit,
+            like=like_list,
+            since=since,
+        )
+    except Exception as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    emit_output(result, json_output=json_output, md=md_output, title="Fish PRISM re-index")
+    return 0
+
+
+@cmd(output=True)
+def index_cleanup(
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """Remove orphan ANN rows (rowid not in corpus_items) from all registered indexes."""
+    from fish.store import cleanup_index_orphans, db_conn, init_db
+    from fish.write_lock import fish_write_lock
+
+    load_env()
+    init_db()
+    with fish_write_lock("train"):
+        with db_conn() as db:
+            removed = cleanup_index_orphans(db)
+    emit_output(
+        {"removed": removed},
+        json_output=json_output,
+        md=md_output,
+        title="Fish index orphan cleanup",
+    )
     return 0
 
 
@@ -395,11 +542,17 @@ def folders(
 
 @cmd
 def embed(
+    limit: int | None = optarg(None, long_flag="--limit", help="Max messages to embed"),
+    kinds: str | None = optarg(None, long_flag="--kinds", help="Comma-separated kinds"),
+    like: str | None = optarg(
+        None, long_flag="--like", help="Comma-separated SQL LIKE filters on text"
+    ),
+    since: str | None = optarg(None, long_flag="--since", help="occurred_at >= ISO date"),
     no_progress: bool = optarg(
         False, long_flag="--no-progress", action="store_true", help="Disable progress bars"
     ),
 ) -> int:
-    """Embed messages that are synced but not yet in the vector index."""
+    """Embed corpus items missing from the legacy raw ANN index."""
     load_env()
     try:
         ensure_openai_api_key(interactive=False)
@@ -407,7 +560,15 @@ def embed(
         print(exc, file=sys.stderr)
         return 1
     init_db()
-    count = embed_all_pending(show_progress=not no_progress)
+    kind_list = [k.strip() for k in kinds.split(",")] if kinds else None
+    like_list = [p.strip() for p in like.split(",") if p.strip()] if like else None
+    count = embed_all_pending(
+        show_progress=not no_progress,
+        max_messages=limit,
+        kinds=kind_list,
+        like=like_list,
+        since=since,
+    )
     print(f"embedded={count}")
     return 0
 

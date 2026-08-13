@@ -1,4 +1,4 @@
-"""Training corpus CLI — fish corpus collect|label|stats|purge."""
+"""Training corpus CLI — fish corpus collect|label|stats|queries|add-gold|purge."""
 
 from __future__ import annotations
 
@@ -91,6 +91,57 @@ def label(
 
 
 @corpus.cmd(output=True)
+def inject_positives(
+    query: str = optarg(..., long_flag="--query", help="Training query text (created if missing)"),
+    like: str = optarg(
+        ...,
+        long_flag="--like",
+        help="Comma-separated SQL LIKE patterns against text/subject",
+    ),
+    since: str | None = optarg(
+        None, long_flag="--since", help="Only corpus items with occurred_at >= ISO date"
+    ),
+    kinds: str = optarg("email", long_flag="--kinds", help="Comma-separated kinds"),
+    limit: int = optarg(200, long_flag="--limit", help="Max matching corpus items"),
+    retriever: str = optarg(
+        "legacy", long_flag="--retriever", help="Retriever tag on inserted samples"
+    ),
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """Force (query, corpus) training pairs for cold-start (e.g. Burning Man → camp mail)."""
+    from fish.prism.inject import inject_positives as run_inject
+
+    load_env()
+    try:
+        ensure_openai_api_key(interactive=False)
+    except RuntimeError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    likes = [p.strip() for p in like.split(",") if p.strip()]
+    if not likes:
+        print("At least one --like pattern is required", file=sys.stderr)
+        return 1
+    kind_list = [k.strip() for k in kinds.split(",") if k.strip()]
+    try:
+        with fish_write_lock("corpus"):
+            result = run_inject(
+                query=query,
+                likes=likes,
+                since=since,
+                kinds=kind_list,
+                limit=limit,
+                retriever=retriever,
+            )
+    except Exception as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    emit_output(result, json_output=json_output, md=md_output, title="Fish corpus inject-positives")
+    return 0
+
+
+@corpus.cmd(output=True)
 def stats(
     *,
     json_output: bool = False,
@@ -101,6 +152,128 @@ def stats(
     with db_conn() as db:
         report = training_corpus_stats(db)
     emit_output(report, json_output=json_output, md=md_output, title="Fish corpus stats")
+    return 0
+
+
+@corpus.cmd(output=True)
+def queries(
+    origin: str | None = optarg(
+        None,
+        long_flag="--origin",
+        help="Filter: real | synthetic | gold (default: all)",
+    ),
+    source: str | None = optarg(
+        None, long_flag="--source", help="Filter by source string"
+    ),
+    limit: int | None = optarg(None, long_flag="--limit", help="Max rows"),
+    embeddings: bool = optarg(
+        False,
+        long_flag="--embeddings",
+        action="store_true",
+        help="Include query_embedding vectors (large)",
+    ),
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """Dump training queries (gold/real/synthetic) with source and metadata."""
+    from fish.prism.gold import dump_queries
+
+    init_db()
+    rows = dump_queries(
+        origin=origin,
+        source=source,
+        limit=limit,
+        include_embeddings=embeddings,
+    )
+    # Compact table fields for non-JSON
+    if not json_output:
+        rows = [
+            {
+                "id": r["id"],
+                "origin": r["origin"],
+                "source": r.get("source"),
+                "created_at": r.get("created_at"),
+                "text": r.get("text"),
+                "meta": r.get("meta") or r.get("meta_json"),
+                "has_embedding": bool(r.get("embed_model")),
+            }
+            for r in rows
+        ]
+    emit_output(
+        rows,
+        json_output=json_output,
+        md=md_output,
+        title=f"Fish training queries ({len(rows)})",
+    )
+    return 0
+
+
+@corpus.cmd(output=True)
+def add_gold(
+    file: str | None = optarg(
+        None,
+        long_flag="--file",
+        help="JSONL path (default: fish/config/gold_queries.jsonl)",
+    ),
+    no_embed: bool = optarg(
+        False,
+        long_flag="--no-embed",
+        action="store_true",
+        help="Skip OpenAI embeddings (collect will embed later)",
+    ),
+    source: str | None = optarg(
+        None,
+        long_flag="--source",
+        help="Default source if a line omits source",
+    ),
+    replace: bool = optarg(
+        False,
+        long_flag="--replace",
+        action="store_true",
+        help="Permanently delete all existing gold queries (and their samples), then load file",
+    ),
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """Load curated gold queries (origin=gold) from JSONL into training_queries."""
+    from pathlib import Path
+
+    from fish.prism.gold import (
+        DEFAULT_SOURCE,
+        add_gold_queries,
+        load_gold_file,
+        replace_gold_queries,
+    )
+
+    load_env()
+    if not no_embed:
+        try:
+            ensure_openai_api_key(interactive=False)
+        except RuntimeError as exc:
+            print(exc, file=sys.stderr)
+            return 1
+    try:
+        entries = load_gold_file(Path(file) if file else None)
+        with fish_write_lock("corpus"):
+            if replace:
+                result = replace_gold_queries(
+                    entries,
+                    embed=not no_embed,
+                    default_source=source or DEFAULT_SOURCE,
+                )
+            else:
+                result = add_gold_queries(
+                    entries,
+                    embed=not no_embed,
+                    default_source=source or DEFAULT_SOURCE,
+                )
+                result["file_count"] = len(entries)
+    except Exception as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    emit_output(result, json_output=json_output, md=md_output, title="Fish corpus add-gold")
     return 0
 
 

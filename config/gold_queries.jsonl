@@ -1,0 +1,200 @@
+{"text": "Burning Man", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn"], "intent": "find_related", "channel": "fish_search"}}
+{"text": "Interaction Café", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "Interaction Café 2026", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "Burn CREW", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "Burn CREW meeting", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "Axis Mundi tickets", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "tickets"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Burning Man waitlist", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "tickets"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "Burning Man ticket confirmation", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "tickets"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "camp belonging Interaction Café", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "who is running the café", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "answer", "channel": "fish_search"}}
+{"text": "Dinner Crews Interaction Café", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "Covid safety café email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "pre-playa Zoom Interaction Café", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "camp setup breakdown café", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "playa address camp location", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "answer", "channel": "fish_search"}}
+{"text": "emails from Emilie Lygren", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "people"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "emails from Cristina Alonso", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "people"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "Lily Coomer café", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "people"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "packing list Burning Man", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn"], "intent": "find", "channel": "fish_search"}}
+{"text": "ticket transfer Axis Mundi", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "tickets"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "hosting.com invoice", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "hosting"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "yknotlabs.com renewal", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "domain"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Figma subscription receipt", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "figma"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "cancel Figma email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "figma"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "Google AI Pro charge", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "google"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Zoom Pro invoice", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "zoom"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Hugging Face Pro receipt", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "hf"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Midjourney receipt", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "midjourney"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Anthropic API invoice", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "anthropic"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "OpenAI API payment", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "openai"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "OpenAI auto-fund email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "openai"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "Windscribe subscription", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "vpn"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "ChatGPT Plus receipt", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "openai"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "GitHub Copilot billing", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "github"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "GCP bill email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "gcp"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Google Cloud invoice", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "gcp"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Maps API charges email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "maps"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Lambda Cloud storage email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "lambda"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "Meshy receipt", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "meshy"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Cursor Pro invoice", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "cursor"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "subscriptions renewing this month", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing"], "intent": "find_related", "channel": "fish_search"}}
+{"text": "what did I pay for hosting", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "hosting"], "intent": "answer", "channel": "fish_search"}}
+{"text": "when is the next Anthropic charge", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "anthropic"], "intent": "answer", "channel": "fish_search"}}
+{"text": "Tesla order confirmation", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["tesla"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Tesla referral email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["tesla"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "Tesla service appointment", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["tesla"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "Tesla insurance email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["tesla"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "Supercharger receipt", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["tesla", "billing"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "emails from Tesla", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["tesla"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "Tesla warranty email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["tesla"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "emails about Cristopoly", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["cristopoly"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "Street View cristopoly email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["cristopoly"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "Figma Cristopoly", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["cristopoly", "figma"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "emails about Game of Y", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["y"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "yknotlabs email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["y", "hosting"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "Jeff Mallett email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["y", "people"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "emails about seehart.com", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["seehart"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "emails about hinario", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["daime"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "hymn recording email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["daime"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "emails about NFNC", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["nfnc"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "Google Sheets NFNC email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["nfnc"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "agi.green email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["work"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "evolver.ai mail", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["work"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "emails from hosting.com", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["hosting"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "domain renewal notice", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["hosting", "domain"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "SSL certificate email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["hosting"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "DNS change confirmation", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["hosting"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "GitHub pull request email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["github"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "Dependabot security alert", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["github", "security"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "GitHub Actions failure email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["github"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "repository invite email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["github"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "Amazon order confirmation", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["shopping"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "package tracking number", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["shipping"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "refund status email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["shopping"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "airline booking confirmation", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["travel"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "hotel reservation", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["travel"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "travel itinerary", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["travel"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "DMV renewal email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["admin"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "insurance policy email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["insurance"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "doctor appointment confirmation", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["health"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "utility bill", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["bills"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "PG&E bill", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["bills"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "phone bill", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["bills"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "donation receipt", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["tax"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "1099 tax document email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["tax"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "password reset email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["security"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "2FA security alert", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["security"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "shipping confirmation kenseehart", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["shipping"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "birthday party invitation", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["social"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "RSVP email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["social"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "calendar invite", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["meetings"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "Zoom meeting invite", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["meetings"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "photos shared by email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["photos"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "JRS email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["personal", "people"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "emails from ken@seehart.com about taxes", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["tax", "personal"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "unread important mail this week", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["triage"], "intent": "priority", "channel": "fish_search"}}
+{"text": "emails I should reply to", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["triage"], "intent": "priority", "channel": "fish_search"}}
+{"text": "receipts from last month", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing"], "intent": "find_related", "channel": "fish_search"}}
+{"text": "warranty or return window emails", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["shopping"], "intent": "find_related", "channel": "fish_search"}}
+{"text": "newsletter unsubscribe candidates", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["triage"], "intent": "find_related", "channel": "fish_search"}}
+{"text": "SMS about Burning Man", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["sms", "burn"], "intent": "find_thread", "channel": "fish_search", "kinds": ["sms"]}}
+{"text": "text messages from (831)535-2442", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["sms"], "intent": "find_thread", "channel": "fish_search", "kinds": ["sms"]}}
+{"text": "ChatGPT conversation about email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["chat"], "intent": "find", "channel": "fish_search", "kinds": ["chat"]}}
+{"text": "Claude chat about billing", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["chat", "billing"], "intent": "find", "channel": "fish_search", "kinds": ["chat"]}}
+{"text": "what do I remember about Interaction Café", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["memory", "burn"], "intent": "recall", "channel": "fish_search", "kinds": ["memory"]}}
+{"text": "memory about camp contacts", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["memory", "burn"], "intent": "recall", "channel": "fish_search", "kinds": ["memory"]}}
+{"text": "find the email where we decided to cancel Figma", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "figma"], "intent": "find_decision", "channel": "fish_search"}}
+{"text": "thread about Interaction Café belonging", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "messages about Burn CREW without saying Burning Man", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "find_related", "channel": "fish_search"}}
+{"text": "receipt for Burning Man tickets", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "tickets"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "emails mentioning Axis Mundi", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "tickets"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "anything from GCP about budget alerts", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "gcp"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "mail about seehart redesign", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["seehart"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "contractor invoice unpaid", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["work", "billing"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "NDA or contract in email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["work", "legal"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "meeting notes follow-up", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["work", "meetings"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "emails from Emilie about dinner crews", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "people"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "Cristina Burn CREW invitation", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "people"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "Doodle poll Interaction Café", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "camp setup email 6", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "helpful hints café email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "running the café email 3", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "OpenAI $40 reload May", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "openai"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Anthropic twenty dollar charge", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "anthropic"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Windscribe Google Play charge", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Midjourney annual May receipt", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "midjourney"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Hugging Face nine dollar charge", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "hf"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Zoom sixteen ninety-nine", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "zoom"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Google One 5TB receipt", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "google"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Figma twenty dollar monthly", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "figma"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "hosting.com twenty nine ninety four", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "hosting"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Lambda US-SOUTH migration email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "lambda"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "emails about RunPod", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "compute"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "Tesla delivery or pickup email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["tesla"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "emails containing VIN or Tesla account", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["tesla"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "Meshy six dollar receipt", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "meshy"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "print shop quote for board", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["cristopoly"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "emails about Monopoly board", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["cristopoly"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "photos from camp in email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "photos"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "Ken Seehart bio or resume request", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["personal"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "password reset for hosting.com", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["security", "hosting"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "security alert unusual sign-in", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["security"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "shipping to Santa Cruz", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["shipping"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "flight confirmation this summer", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["travel"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "Airbnb or lodging confirmation", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["travel"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "car registration email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["admin"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "smog or vehicle registration", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["admin"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "dental appointment email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["health"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "lab results email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["health"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "donation thank you receipt", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["tax"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "W-2 or tax form email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["tax"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "emails from agi.green about Anthropic", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "anthropic"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "mails I got about domain yknotlabs", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["y", "hosting"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "invitation Burn CREW Thursday", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "Google Sheet Interaction Café", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "Fwd Burning Man tickets on sale", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "tickets"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "emails about waitlist Burning Man 2026", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "tickets"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "order confirmation Axis Mundi", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "tickets"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "who emailed about café shifts", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "answer", "channel": "fish_search"}}
+{"text": "recent mail about Interaction Café", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "unread café emails", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "camp", "triage"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "receipts and invoices July", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing"], "intent": "find_related", "channel": "fish_search"}}
+{"text": "marketing emails to unsubscribe", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["triage"], "intent": "find_related", "channel": "fish_search"}}
+{"text": "important personal mail this week", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["triage", "personal"], "intent": "priority", "channel": "fish_search"}}
+{"text": "emails mentioning PRISM or fish IMAP", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["fish"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "IMAP or mail sync error emails", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["fish"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "OpenAI API key or billing notice", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "openai"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "emails about Claude or Anthropic usage", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "anthropic"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "GitHub security advisory email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["github", "security"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "Copilot usage notice", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["github", "billing"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "emails from nvidia or GTC", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["events"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "Eventbrite ticket email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["events"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Meetup event email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["events"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "Discord Midjourney billing email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "midjourney"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "emails about VPN subscription", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "vpn"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "Google Play subscription email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "App Store or Play Store receipt", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "wire transfer or bank alert", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["finance"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "credit card statement email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["finance"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "PayPal receipt", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["finance"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "Venmo or payment request", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["finance"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "emails about insurance claim", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["insurance"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "lease or rent email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["admin"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "HOA or property email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["admin"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "school or kids schedule email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["personal"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "family travel plans email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["travel", "personal"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "wedding or party RSVP", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["social"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "condolence or thank you email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["personal"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "letter of recommendation request", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["work"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "job offer or recruiter email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["work"], "intent": "find_thread", "channel": "fish_search"}}
+{"text": "conference registration email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["events", "work"], "intent": "find_receipt", "channel": "fish_search"}}
+{"text": "visa or passport appointment", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["travel", "admin"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "COVID test or vaccine record email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["health"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "prescription ready email", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["health"], "intent": "find_message", "channel": "fish_search"}}
+{"text": "emails about Interaction Café", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn"], "intent": "search", "channel": "fish_search"}}
+{"text": "emails about Burning Man tickets", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["burn", "tickets"], "intent": "search", "channel": "fish_search"}}
+{"text": "emails about hosting.com", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["hosting"], "intent": "search", "channel": "fish_search"}}
+{"text": "emails about Figma billing", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "figma"], "intent": "search", "channel": "fish_search"}}
+{"text": "emails about OpenAI charges", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "openai"], "intent": "search", "channel": "fish_search"}}
+{"text": "emails about Anthropic invoice", "source": "curated:email-kb:2026-08-13", "meta": {"topics": ["billing", "anthropic"], "intent": "search", "channel": "fish_search"}}

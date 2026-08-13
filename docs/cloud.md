@@ -53,12 +53,30 @@ fish write-lock-status
 
 ## Scheduled sync
 
-`fish-sync.timer` on the VM runs `fish sync --no-progress` every 6 hours (00:00, 06:00, 12:00, 18:00 UTC).
+`fish-sync.timer` on the VM runs `python -m fish sync --no-progress` every 6 hours (00:00, 06:00, 12:00, 18:00 UTC).
 
 ```bash
-compute ssh mcp-services -- sudo systemctl status fish-sync.timer
-compute ssh mcp-services -- sudo systemctl start fish-sync.service   # manual run
+compute ssh mcp-services
+# or one-shot remote command:
+gcloud compute ssh mcp-services --project=agi-green --zone=us-central1-a --tunnel-through-iap \
+  --command='sudo systemctl status fish-sync.timer'
+
+compute ssh mcp-services   # interactive
+# then: sudo systemctl start fish-sync.service
 ```
+
+`fish_search` (MCP) also auto-syncs when the corpus is older than ~5 minutes and **fails loudly** if any account is missing IMAP credentials.
+
+## Auth on the VM
+
+IMAP passwords live in `/home/mcp/.config/fish/` (`accounts.yaml` and/or `FISH_PASSWORD_*` in `fish.env`). After changing local secrets:
+
+```bash
+sitehost setup-fish-cloud --skip-disk --no-migrate   # pushes accounts.yaml + fish.env (incl. FISH_PASSWORD_*)
+sitehost deploy-mcp-gateway                          # restarts mcp-fish + fish-sync unit
+```
+
+Do not paste app passwords into Claude/Cursor chat.
 
 ## Laptop / RunPod
 
