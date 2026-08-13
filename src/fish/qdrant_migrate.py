@@ -14,10 +14,9 @@ from fish.qdrant_store import (
     upsert_points_batch,
 )
 from fish.store import (
+    blob_to_embedding,
     db_conn,
-    get_corpus_by_id,
     init_db,
-    list_corpus_with_raw_embedding,
 )
 from fish.write_lock import fish_write_lock
 
@@ -132,7 +131,7 @@ def reindex_legacy_qdrant(
     show_progress: bool = True,
     kinds: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Upsert corpus_raw_embeddings into the legacy Qdrant collection."""
+    """Upsert corpus_raw_embeddings into the legacy Qdrant collection (streamed)."""
     init_db()
     with fish_write_lock("train"):
         with db_conn() as db:
@@ -143,33 +142,66 @@ def reindex_legacy_qdrant(
                 raise RuntimeError("legacy model missing")
             collection = model["vec_table"]
             ensure_collection(collection)
-            items = list_corpus_with_raw_embedding(
-                db, kinds=kinds, limit=limit
-            )
+
+            count_sql = """
+                SELECT COUNT(*) FROM corpus_raw_embeddings r
+                JOIN corpus_items c ON c.id = r.item_id
+                WHERE 1=1
+            """
+            count_params: list[Any] = []
+            if kinds:
+                placeholders = ",".join("?" for _ in kinds)
+                count_sql += f" AND c.kind IN ({placeholders})"
+                count_params.extend(kinds)
+            total = int(db.execute(count_sql, count_params).fetchone()[0])
+            if limit is not None:
+                total = min(total, int(limit))
+
             bar = progress_bar(
-                total=len(items),
+                total=total,
                 desc=f"qdrant {collection}",
                 unit="pt",
                 disable=not show_progress,
             )
-            batch: list[tuple[int, list[float], dict[str, Any]]] = []
             upserted = 0
-            for row in items:
-                item_id = int(row["id"])
-                raw = row["raw_embedding"]
-                corpus = get_corpus_by_id(db, item_id)
-                if corpus is None:
-                    bar.update(1)
-                    continue
-                batch.append((item_id, raw, build_payload(corpus)))
-                if len(batch) >= batch_size:
+            last_id = 0
+            while upserted < total:
+                chunk = min(batch_size, total - upserted)
+                sql = """
+                    SELECT c.id, c.kind, c.source, c.occurred_at, c.payload, r.embedding
+                    FROM corpus_raw_embeddings r
+                    JOIN corpus_items c ON c.id = r.item_id
+                    WHERE c.id > ?
+                """
+                params: list[Any] = [last_id]
+                if kinds:
+                    placeholders = ",".join("?" for _ in kinds)
+                    sql += f" AND c.kind IN ({placeholders})"
+                    params.extend(kinds)
+                sql += " ORDER BY c.id ASC LIMIT ?"
+                params.append(chunk)
+                rows = db.execute(sql, params).fetchall()
+                if not rows:
+                    break
+                batch: list[tuple[int, list[float], dict[str, Any]]] = []
+                for row in rows:
+                    item_id = int(row["id"])
+                    last_id = item_id
+                    emb = blob_to_embedding(row["embedding"])
+                    if not emb:
+                        continue
+                    corpus = {
+                        "id": item_id,
+                        "kind": row["kind"],
+                        "source": row["source"],
+                        "occurred_at": row["occurred_at"],
+                        "payload": row["payload"],
+                    }
+                    batch.append((item_id, emb, build_payload(corpus)))
+                if batch:
                     upsert_points_batch(collection, batch)
                     upserted += len(batch)
-                    batch.clear()
-                bar.update(1)
-            if batch:
-                upsert_points_batch(collection, batch)
-                upserted += len(batch)
+                    bar.update(len(batch))
             bar.close()
             count = collection_point_count(collection)
     return {
