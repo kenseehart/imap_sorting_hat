@@ -15,7 +15,8 @@ _PACKAGE_DEFAULTS = Path(__file__).resolve().parents[3] / "config" / "prism_mode
 USER_MODELS_YAML = CONFIG_DIR / "prism_models.yaml"
 
 LEGACY_MODEL_ID = "legacy"
-LEGACY_VEC_TABLE = "corpus_vec"
+LEGACY_VEC_TABLE = "corpus_vec"  # historical sqlite-vec name
+LEGACY_COLLECTION = "fish_legacy"
 
 
 def _utc_stamp() -> str:
@@ -44,12 +45,17 @@ def parse_model_id(model_id: str) -> tuple[str, str | None]:
     return config_name, ts
 
 
-def vec_table_for_model_id(model_id: str) -> str:
+def collection_for_model_id(model_id: str) -> str:
+    """Qdrant collection name (also stored in retrieval_models.vec_table)."""
     if model_id == LEGACY_MODEL_ID:
-        return LEGACY_VEC_TABLE
-    # sqlite-vec table names: alnum + underscore
+        return LEGACY_COLLECTION
     safe = model_id.replace(".", "_").replace("-", "_")
-    return f"corpus_vec__{safe}"
+    return f"fish_{safe}"
+
+
+def vec_table_for_model_id(model_id: str) -> str:
+    """Backward-compatible alias: Qdrant collection name."""
+    return collection_for_model_id(model_id)
 
 
 def load_prism_model_configs() -> dict[str, dict[str, Any]]:

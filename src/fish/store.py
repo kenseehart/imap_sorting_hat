@@ -7,16 +7,25 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterator, Literal
 
-import sqlite_vec
-from sqlite_vec import serialize_float32
+import numpy as np
 
-from fish.config import EMBED_DIM, db_path, ensure_config_dir
+from fish.config import db_path, ensure_config_dir
 from fish.corpus import CorpusItem, corpus_row_to_dict, email_corpus_from_message
 from fish.parse import ParsedMessage
 
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def embedding_to_blob(vec: list[float]) -> bytes:
+    return np.asarray(vec, dtype=np.float32).tobytes()
+
+
+def blob_to_embedding(blob: bytes | None) -> list[float] | None:
+    if blob is None:
+        return None
+    return np.frombuffer(blob, dtype=np.float32).tolist()
 
 
 SCHEMA = f"""
@@ -121,6 +130,13 @@ CREATE INDEX IF NOT EXISTS idx_corpus_kind ON corpus_items(kind);
 CREATE INDEX IF NOT EXISTS idx_corpus_occurred ON corpus_items(occurred_at);
 CREATE INDEX IF NOT EXISTS idx_corpus_source ON corpus_items(source);
 
+CREATE TABLE IF NOT EXISTS corpus_raw_embeddings (
+    item_id INTEGER PRIMARY KEY,
+    embedding BLOB NOT NULL,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (item_id) REFERENCES corpus_items(id)
+);
+
 CREATE TABLE IF NOT EXISTS retrieval_models (
     model_id TEXT PRIMARY KEY,
     config_name TEXT NOT NULL,
@@ -189,9 +205,6 @@ def connect() -> sqlite3.Connection:
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA busy_timeout=30000")
     db.row_factory = sqlite3.Row
-    db.enable_load_extension(True)
-    sqlite_vec.load(db)
-    db.enable_load_extension(False)
     return db
 
 
@@ -219,51 +232,11 @@ def init_db() -> None:
             db.execute("ALTER TABLE training_queries ADD COLUMN source TEXT")
         if "meta_json" not in tq_cols:
             db.execute("ALTER TABLE training_queries ADD COLUMN meta_json TEXT")
-        _ensure_vec_table(db, "corpus_vec")
-        _ensure_vec_table(db, "message_vec")
         from fish.prism.registry import ensure_legacy_model, ensure_model_vec_tables
 
         ensure_legacy_model(db)
         ensure_model_vec_tables(db)
         _migrate_messages_to_corpus(db)
-
-
-def _ensure_vec_table(db: sqlite3.Connection, name: str) -> None:
-    row = db.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (name,)
-    ).fetchone()
-    if not row:
-        db.execute(
-            f"CREATE VIRTUAL TABLE {name} USING vec0(embedding float[{EMBED_DIM}])"
-        )
-
-
-def _raw_vec_table(db: sqlite3.Connection) -> str:
-    """ANN index of frozen OpenAI embeddings c (legacy / raw cosine).
-
-    Source of truth is ``retrieval_models`` for model_id=legacy (may be a
-    generation-suffixed table after wipe). Falls back to corpus_vec / message_vec.
-    """
-    from fish.prism.configs import LEGACY_MODEL_ID, LEGACY_VEC_TABLE
-
-    try:
-        from fish.prism.registry import get_retrieval_model
-
-        model = get_retrieval_model(db, LEGACY_MODEL_ID)
-        if model and model.get("vec_table"):
-            return str(model["vec_table"])
-    except sqlite3.OperationalError:
-        pass
-    row = db.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-        (LEGACY_VEC_TABLE,),
-    ).fetchone()
-    return LEGACY_VEC_TABLE if row else "message_vec"
-
-
-def _vec_table(db: sqlite3.Connection) -> str:
-    """Backward-compat alias: legacy raw ANN table."""
-    return _raw_vec_table(db)
 
 
 def _migrate_messages_to_corpus(db: sqlite3.Connection) -> None:
@@ -599,47 +572,59 @@ def mark_memory_superseded(
 
 
 def get_embedding(db: sqlite3.Connection, item_id: int) -> list[float] | None:
-    """Legacy / raw ANN embedding c (corpus_vec)."""
-    return _get_vec(db, _raw_vec_table(db), item_id)
-
-
-def _get_vec(db: sqlite3.Connection, table: str, item_id: int) -> list[float] | None:
-    import numpy as np
-
-    row = db.execute(
-        f"SELECT embedding FROM {table} WHERE rowid = ?", (item_id,)
-    ).fetchone()
-    if not row:
-        return None
-    return np.frombuffer(row["embedding"], dtype=np.float32).tolist()
+    """Frozen OpenAI raw embedding c (SQLite corpus_raw_embeddings)."""
+    return get_raw_embedding(db, item_id)
 
 
 def get_raw_embedding(db: sqlite3.Connection, item_id: int) -> list[float] | None:
-    """Frozen OpenAI embedding c from the legacy ANN index (sole copy)."""
-    return get_embedding(db, item_id)
+    """Frozen OpenAI embedding c from SQLite (sole durable copy of raw vectors)."""
+    row = db.execute(
+        "SELECT embedding FROM corpus_raw_embeddings WHERE item_id = ?",
+        (item_id,),
+    ).fetchone()
+    if not row:
+        return None
+    return blob_to_embedding(row["embedding"])
 
 
 def get_model_embedding(
     db: sqlite3.Connection, item_id: int, model_id: str
 ) -> list[float] | None:
     from fish.prism.registry import get_retrieval_model
+    from fish.qdrant_store import get_point_vector
 
     model = get_retrieval_model(db, model_id)
     if model is None:
         raise KeyError(f"Unknown model_id {model_id!r}")
-    return _get_vec(db, model["vec_table"], item_id)
+    return get_point_vector(model["vec_table"], item_id)
 
 
 def set_embedding(db: sqlite3.Connection, message_id: int, embedding: list[float]) -> None:
     set_corpus_embedding(db, message_id, embedding)
 
 
-def _upsert_vec(db: sqlite3.Connection, table: str, item_id: int, embedding: list[float]) -> None:
-    db.execute(f"DELETE FROM {table} WHERE rowid = ?", (item_id,))
+def _store_raw_embedding(
+    db: sqlite3.Connection, item_id: int, embedding: list[float]
+) -> None:
     db.execute(
-        f"INSERT INTO {table}(rowid, embedding) VALUES (?, ?)",
-        (item_id, serialize_float32(embedding)),
+        """
+        INSERT INTO corpus_raw_embeddings (item_id, embedding, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(item_id) DO UPDATE SET
+            embedding = excluded.embedding,
+            updated_at = excluded.updated_at
+        """,
+        (item_id, embedding_to_blob(embedding), _utcnow()),
     )
+
+
+def _payload_for_item(db: sqlite3.Connection, item_id: int) -> dict[str, Any]:
+    from fish.qdrant_store import build_payload
+
+    row = get_corpus_by_id(db, item_id)
+    if row is None:
+        raise KeyError(f"corpus item {item_id} not found")
+    return build_payload(row)
 
 
 def set_corpus_embedding(
@@ -649,15 +634,22 @@ def set_corpus_embedding(
     *,
     model_embeddings: dict[str, list[float]] | None = None,
 ) -> None:
-    """Write raw vector to legacy index; optional per-model Ac vectors.
+    """Persist raw c in SQLite; upsert Qdrant points for legacy + PRISM models.
 
-    ``embedding`` is always the frozen OpenAI raw c → corpus_vec.
+    ``embedding`` is always the frozen OpenAI raw c.
     ``model_embeddings`` maps model_id → Ac(c) for registered PRISM indexes.
     """
     from fish.prism.configs import LEGACY_MODEL_ID
     from fish.prism.registry import get_retrieval_model, list_retrieval_models
+    from fish.qdrant_store import upsert_point
 
-    _upsert_vec(db, _raw_vec_table(db), item_id, embedding)
+    _store_raw_embedding(db, item_id, embedding)
+    payload = _payload_for_item(db, item_id)
+    legacy = get_retrieval_model(db, LEGACY_MODEL_ID)
+    if legacy is None:
+        raise RuntimeError("legacy retrieval model missing — run init_db")
+    upsert_point(legacy["vec_table"], item_id, embedding, payload)
+
     extras = model_embeddings or {}
     for model in list_retrieval_models(db):
         mid = model["model_id"]
@@ -665,7 +657,7 @@ def set_corpus_embedding(
             continue
         vec = extras.get(mid)
         if vec is not None:
-            _upsert_vec(db, model["vec_table"], item_id, vec)
+            upsert_point(model["vec_table"], item_id, vec, payload)
     now = _utcnow()
     db.execute(
         "UPDATE corpus_items SET embedded_at = ? WHERE id = ?",
@@ -685,25 +677,34 @@ def set_model_embedding(
 ) -> None:
     from fish.prism.configs import LEGACY_MODEL_ID
     from fish.prism.registry import get_retrieval_model
+    from fish.qdrant_store import upsert_point
 
     if model_id == LEGACY_MODEL_ID:
-        _upsert_vec(db, _raw_vec_table(db), item_id, embedding)
+        _store_raw_embedding(db, item_id, embedding)
+        model = get_retrieval_model(db, LEGACY_MODEL_ID)
+        if model is None:
+            raise RuntimeError("legacy retrieval model missing — run init_db")
+        upsert_point(
+            model["vec_table"], item_id, embedding, _payload_for_item(db, item_id)
+        )
         return
     model = get_retrieval_model(db, model_id)
     if model is None:
         raise KeyError(f"Unknown model_id {model_id!r}")
-    _upsert_vec(db, model["vec_table"], item_id, embedding)
+    upsert_point(
+        model["vec_table"], item_id, embedding, _payload_for_item(db, item_id)
+    )
 
 
 def unindex_corpus_item(db: sqlite3.Connection, item_id: int) -> int:
-    """Remove item from every registered retrieval index."""
+    """Remove item from SQLite raw store and every Qdrant collection."""
     from fish.prism.registry import list_retrieval_models
+    from fish.qdrant_store import delete_point
 
     n = 0
+    db.execute("DELETE FROM corpus_raw_embeddings WHERE item_id = ?", (item_id,))
     for model in list_retrieval_models(db):
-        db.execute(
-            f"DELETE FROM {model['vec_table']} WHERE rowid = ?", (item_id,)
-        )
+        delete_point(model["vec_table"], item_id)
         n += 1
     db.execute(
         "UPDATE corpus_items SET embedded_at = NULL WHERE id = ?", (item_id,)
@@ -715,61 +716,65 @@ def unindex_corpus_item(db: sqlite3.Connection, item_id: int) -> int:
 
 
 def cleanup_index_orphans(db: sqlite3.Connection) -> dict[str, int]:
-    """Delete vec rows whose rowid is not a live corpus_items.id."""
+    """Delete Qdrant points / raw rows whose id is not a live corpus_items.id."""
     from fish.prism.registry import list_retrieval_models
+    from fish.qdrant_store import delete_point, scroll_ids
 
     removed: dict[str, int] = {}
+    # Raw SQLite orphans
+    raw_orphans = db.execute(
+        """
+        SELECT r.item_id FROM corpus_raw_embeddings r
+        LEFT JOIN corpus_items c ON c.id = r.item_id
+        WHERE c.id IS NULL
+        """
+    ).fetchall()
+    for row in raw_orphans:
+        db.execute(
+            "DELETE FROM corpus_raw_embeddings WHERE item_id = ?", (int(row[0]),)
+        )
+    removed["corpus_raw_embeddings"] = len(raw_orphans)
+
     for model in list_retrieval_models(db):
-        table = model["vec_table"]
-        # Collect orphan rowids (vec0 may not support NOT IN subquery delete well)
-        try:
-            rows = db.execute(f"SELECT rowid FROM {table}").fetchall()
-        except sqlite3.OperationalError:
-            removed[model["model_id"]] = 0
-            continue
+        collection = model["vec_table"]
         count = 0
-        for row in rows:
-            rid = int(row[0])
+        for rid in scroll_ids(collection, limit=10_000_000):
             exists = db.execute(
                 "SELECT 1 FROM corpus_items WHERE id = ?", (rid,)
             ).fetchone()
             if not exists:
-                db.execute(f"DELETE FROM {table} WHERE rowid = ?", (rid,))
+                delete_point(collection, rid)
                 count += 1
         removed[model["model_id"]] = count
     return removed
 
 
 def wipe_all_vector_indexes(db: sqlite3.Connection) -> dict[str, str]:
-    """Discard all ANN indexes (corrupt recovery). Preserves corpus_items text.
+    """Discard all Qdrant ANN indexes (corrupt recovery). Keeps corpus text + raw embeds.
 
-    Does **not** DROP/RENAME/COUNT huge sqlite-vec tables (those hang under load).
-    Retires each registered index by pointing ``retrieval_models.vec_table`` at a
-    fresh empty table; old vec tables remain as disk trash for offline cleanup.
+    Recreates empty collections for each registered model. Re-run
+    ``fish qdrant-reindex`` / ``fish prism-reembed`` to rebuild ANN from
+    ``corpus_raw_embeddings``.
     """
+    from fish.prism.configs import vec_table_for_model_id
     from fish.prism.registry import list_retrieval_models
+    from fish.qdrant_store import delete_collection, ensure_collection
 
     cleared: dict[str, str] = {}
-    stamp = _utcnow().replace(":", "").replace("-", "").replace("T", "")[:14]
     for model in list_retrieval_models(db):
         mid = model["model_id"]
         old = model["vec_table"]
-        # Keep names short/safe for sqlite-vec
-        if mid == "legacy":
-            new = f"corpus_vec_g{stamp}"
-        else:
-            safe = mid.replace(".", "_").replace("-", "_")
-            new = f"corpus_vec__{safe}_g{stamp}"
-        _ensure_vec_table(db, new)
-        db.execute(
-            "UPDATE retrieval_models SET vec_table = ? WHERE model_id = ?",
-            (new, mid),
-        )
-        cleared[mid] = f"{old}->{new}"
-    # Do not mass-UPDATE embedded_at (slow on large DBs). Pending embeds are
-    # detected via missing rowids in the (new, empty) legacy vec table.
+        expected = vec_table_for_model_id(mid)
+        delete_collection(old)
+        if old != expected:
+            delete_collection(expected)
+            db.execute(
+                "UPDATE retrieval_models SET vec_table = ? WHERE model_id = ?",
+                (expected, mid),
+            )
+        ensure_collection(expected)
+        cleared[mid] = f"wiped:{expected}"
     return cleared
-
 
 
 def list_corpus_with_raw_embedding(
@@ -780,11 +785,12 @@ def list_corpus_with_raw_embedding(
     like: list[str] | None = None,
     since: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Items present in the legacy raw ANN index (eligible for PRISM re-index)."""
-    raw_table = _raw_vec_table(db)
-    sql = f"""
-        SELECT c.id, c.kind FROM corpus_items c
-        WHERE c.id IN (SELECT rowid FROM {raw_table})
+    """Items with a stored raw embedding (eligible for PRISM / Qdrant re-index)."""
+    sql = """
+        SELECT c.id, c.kind, r.embedding
+        FROM corpus_items c
+        JOIN corpus_raw_embeddings r ON r.item_id = c.id
+        WHERE 1=1
     """
     params: list[Any] = []
     if kinds:
@@ -809,7 +815,7 @@ def list_corpus_with_raw_embedding(
     rows = db.execute(sql, params).fetchall()
     out: list[dict[str, Any]] = []
     for row in rows:
-        raw = get_raw_embedding(db, int(row["id"]))
+        raw = blob_to_embedding(row["embedding"])
         if not raw:
             continue
         out.append(
@@ -823,12 +829,11 @@ def count_messages_needing_embedding(db: sqlite3.Connection) -> int:
 
 
 def count_corpus_needing_embedding(db: sqlite3.Connection) -> int:
-    """Items missing a row in the legacy raw ANN index."""
-    raw_table = _raw_vec_table(db)
+    """Items missing a row in corpus_raw_embeddings."""
     row = db.execute(
-        f"""
+        """
         SELECT COUNT(*) FROM corpus_items
-        WHERE id NOT IN (SELECT rowid FROM {raw_table})
+        WHERE id NOT IN (SELECT item_id FROM corpus_raw_embeddings)
         """
     ).fetchone()
     return int(row[0])
@@ -846,10 +851,9 @@ def corpus_needing_embedding(
     like: list[str] | None = None,
     since: str | None = None,
 ) -> list[dict[str, Any]]:
-    raw_table = _raw_vec_table(db)
-    sql = f"""
+    sql = """
         SELECT id, text_for_embed FROM corpus_items
-        WHERE id NOT IN (SELECT rowid FROM {raw_table})
+        WHERE id NOT IN (SELECT item_id FROM corpus_raw_embeddings)
     """
     params: list[Any] = []
     if kinds:
@@ -886,9 +890,16 @@ def corpus_vector_search(
     kinds: list[str] | None = None,
     *,
     model_id: str = "legacy",
+    since: str | None = None,
+    until: str | None = None,
+    from_contains: str | None = None,
+    account_email: str | None = None,
+    folder: str | None = None,
+    unread_only: bool = False,
 ) -> list[tuple[int, float]]:
-    """ANN search against the vec table for ``model_id`` (default legacy/raw)."""
+    """ANN search against the Qdrant collection for ``model_id`` (default legacy/raw)."""
     from fish.prism.registry import get_retrieval_model
+    from fish.qdrant_store import search as qdrant_search
 
     k = int(limit)
     if k <= 0:
@@ -896,31 +907,18 @@ def corpus_vector_search(
     model = get_retrieval_model(db, model_id)
     if model is None:
         raise KeyError(f"Unknown model_id {model_id!r}")
-    table = model["vec_table"]
-    rows = db.execute(
-        f"""
-        SELECT rowid, distance
-        FROM {table}
-        WHERE embedding MATCH ?
-          AND k = ?
-        ORDER BY distance
-        """,
-        (serialize_float32(query_embedding), k * 3 if kinds else k),
-    ).fetchall()
-    hits = [(int(r[0]), float(r[1])) for r in rows]
-    if not kinds:
-        return hits[:k]
-    allowed = set(kinds)
-    filtered: list[tuple[int, float]] = []
-    for item_id, dist in hits:
-        row = db.execute(
-            "SELECT kind FROM corpus_items WHERE id = ?", (item_id,)
-        ).fetchone()
-        if row and row["kind"] in allowed:
-            filtered.append((item_id, dist))
-        if len(filtered) >= k:
-            break
-    return filtered
+    return qdrant_search(
+        model["vec_table"],
+        query_embedding,
+        limit=k,
+        kinds=kinds,
+        since=since,
+        until=until,
+        from_contains=from_contains,
+        account_email=account_email,
+        folder=folder,
+        unread_only=unread_only,
+    )
 
 
 def keyword_search(
@@ -1138,18 +1136,6 @@ def query_text_hash(text: str) -> str:
 def sample_pair_hash(query_id: int, corpus_item_id: int, retriever: str) -> str:
     payload = f"{query_id}\0{corpus_item_id}\0{retriever}"
     return hashlib.sha256(payload.encode()).hexdigest()
-
-
-def embedding_to_blob(vec: list[float]) -> bytes:
-    return serialize_float32(vec)
-
-
-def blob_to_embedding(blob: bytes | None) -> list[float] | None:
-    if blob is None:
-        return None
-    import numpy as np
-
-    return np.frombuffer(blob, dtype=np.float32).tolist()
 
 
 def training_query_row_to_dict(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:

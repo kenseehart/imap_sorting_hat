@@ -368,7 +368,7 @@ def prism_reembed(
     json_output: bool = False,
     md_output: bool = False,
 ) -> int:
-    """Re-index a PRISM model's ANN from legacy corpus_vec (no OpenAI)."""
+    """Re-index a PRISM model's Qdrant collection from corpus_raw_embeddings (no OpenAI)."""
     from fish.prism.reembed import prism_reembed as run_reembed
 
     load_env()
@@ -387,6 +387,95 @@ def prism_reembed(
         print(exc, file=sys.stderr)
         return 1
     emit_output(result, json_output=json_output, md=md_output, title="Fish PRISM re-index")
+    return 0
+
+
+@cmd(output=True)
+def qdrant_migrate(
+    source_table: str | None = optarg(
+        None,
+        long_flag="--source-table",
+        help="sqlite-vec table to copy (default: corpus_vec if present)",
+    ),
+    limit: int | None = optarg(
+        None, long_flag="--limit", help="Max vectors (smoke test)"
+    ),
+    batch_size: int = optarg(
+        256, long_flag="--batch-size", help="Qdrant upsert batch size"
+    ),
+    skip_copy: bool = optarg(
+        False,
+        long_flag="--skip-copy",
+        action="store_true",
+        help="Do not copy from sqlite-vec; only upsert existing corpus_raw_embeddings",
+    ),
+    skip_qdrant: bool = optarg(
+        False,
+        long_flag="--skip-qdrant",
+        action="store_true",
+        help="Only copy into corpus_raw_embeddings; do not upsert Qdrant",
+    ),
+    no_progress: bool = optarg(
+        False, long_flag="--no-progress", action="store_true", help="Disable progress bars"
+    ),
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """Copy sqlite-vec → corpus_raw_embeddings and upsert legacy Qdrant collection."""
+    from fish.qdrant_migrate import migrate_to_qdrant
+
+    load_env()
+    try:
+        result = migrate_to_qdrant(
+            copy_from_sqlite_vec=not skip_copy,
+            source_table=source_table,
+            limit=limit,
+            batch_size=batch_size,
+            show_progress=not no_progress,
+            skip_qdrant=skip_qdrant,
+        )
+    except Exception as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    emit_output(result, json_output=json_output, md=md_output, title="Fish Qdrant migrate")
+    return 0
+
+
+@cmd(output=True)
+def qdrant_reindex(
+    limit: int | None = optarg(
+        None, long_flag="--limit", help="Max items (smoke test)"
+    ),
+    batch_size: int = optarg(
+        256, long_flag="--batch-size", help="Qdrant upsert batch size"
+    ),
+    kinds: str | None = optarg(
+        None, long_flag="--kinds", help="Comma-separated kinds"
+    ),
+    no_progress: bool = optarg(
+        False, long_flag="--no-progress", action="store_true", help="Disable progress bars"
+    ),
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """Upsert corpus_raw_embeddings into the legacy Qdrant collection."""
+    from fish.qdrant_migrate import reindex_legacy_qdrant
+
+    load_env()
+    kind_list = [k.strip() for k in kinds.split(",")] if kinds else None
+    try:
+        result = reindex_legacy_qdrant(
+            limit=limit,
+            batch_size=batch_size,
+            show_progress=not no_progress,
+            kinds=kind_list,
+        )
+    except Exception as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    emit_output(result, json_output=json_output, md=md_output, title="Fish Qdrant reindex")
     return 0
 
 

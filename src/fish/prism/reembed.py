@@ -1,4 +1,4 @@
-"""Re-index a registered PRISM model's ANN from the legacy raw index (no OpenAI)."""
+"""Re-index a registered PRISM model's Qdrant collection from corpus_raw_embeddings."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ def prism_reembed(
     like: list[str] | None = None,
     since: str | None = None,
 ) -> dict[str, Any]:
-    """Rewrite one PRISM model's vec table from corpus_vec (legacy raw)."""
+    """Rewrite one PRISM model's Qdrant collection from stored raw embeddings."""
     init_db()
     clear_model_cache()
     with fish_write_lock("train"):
@@ -53,10 +53,13 @@ def prism_reembed(
             if not items:
                 return {
                     "model_id": model_id,
-                    "vec_table": model["vec_table"],
+                    "collection": model["vec_table"],
                     "adapted": 0,
                     "openai_calls": 0,
-                    "note": "No raw vectors in corpus_vec — run fish embed first",
+                    "note": (
+                        "No raw vectors in corpus_raw_embeddings — "
+                        "run fish embed / qdrant-migrate first"
+                    ),
                 }
 
             bar = progress_bar(
@@ -76,7 +79,7 @@ def prism_reembed(
 
     return {
         "model_id": model_id,
-        "vec_table": model["vec_table"],
+        "collection": model["vec_table"],
         "adapted": adapted,
         "limit": limit,
         "like": like,

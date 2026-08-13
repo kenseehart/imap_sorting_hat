@@ -15,23 +15,23 @@ PRISM is **not** standard semantic similarity. It trains dual adapters so that
 
 ## Retrieval models & indexes
 
-Table `retrieval_models` registers every searchable index:
+Table `retrieval_models` registers every searchable index. ANN lives in **Qdrant**;
+frozen OpenAI vectors \(c\) live in SQLite `corpus_raw_embeddings`.
 
-| `model_id` | Index | Meaning |
-|------------|-------|---------|
-| `legacy` | `corpus_vec` | Raw cosine (OpenAI \(c\)) |
-| `{config}.{timestamp}` | `corpus_vec__{config}_{timestamp}` | \(A_c(c)\) for that `.prz` |
+| `model_id` | Qdrant collection (`vec_table`) | Meaning |
+|------------|----------------------------------|---------|
+| `legacy` | `fish_legacy` | Raw cosine (OpenAI \(c\)) |
+| `{config}.{timestamp}` | `fish_{config}_{timestamp}` | \(A_c(c)\) for that `.prz` |
 
 - `model_id = {config_name}.{UTC_timestamp}` e.g. `smoke.20260813T120000Z`
 - Weights file: `models/{model_id}.prz` (numpy zip, not JSON)
 - MLP hyperparameters: `config/prism_models.yaml` (override `~/.config/fish/prism_models.yaml`)
 - Active model: `FISH_PRISM_MODEL={model_id}` or `retrieval_models.active`
-- Vec tables store **only** `rowid → float[1536]` (reference `corpus_items.id`). No email text in indexes.
-- Delete / supersede calls `unindex_corpus_item` across **all** registered indexes.
-- `fish index-cleanup` removes orphan ANN rows.
-- Corrupt recovery: `wipe_all_vector_indexes` **retires** indexes by pointing
-  `retrieval_models.vec_table` at a fresh empty table (no DROP/RENAME/COUNT on
-  huge sqlite-vec — those hang). Old vec tables stay as disk trash for offline cleanup.
+- Env: `FISH_QDRANT_URL` (required; fail-fast if unreachable), optional `FISH_QDRANT_API_KEY`
+- Delete / supersede calls `unindex_corpus_item` across raw SQLite + all Qdrant collections
+- `fish index-cleanup` removes orphan points / raw rows
+- Corrupt recovery: `wipe_all_vector_indexes` deletes/recreates Qdrant collections (keeps `corpus_raw_embeddings`); then `fish qdrant-reindex` / `fish prism-reembed`
+- One-time from sqlite-vec: `fish qdrant-migrate` (copy blobs + upsert legacy collection)
 
 ## Training pipeline (start small)
 
@@ -53,11 +53,11 @@ fish corpus label --limit 400
 # 4. Train → registers model_id + writes binary .prz
 fish prism-train --config smoke
 
-# 5. Embed a smoke slice into legacy index (OpenAI once)
+# 5. Embed a smoke slice (OpenAI once → SQLite raw + Qdrant legacy)
 fish embed --limit 100 --kinds email \
   --like "%Interaction Café%,%Burn CREW%,%Burning Man%" --since 2026-01-01
 
-# 6. Fill that model's ANN from raw (no OpenAI)
+# 6. Fill that model's Qdrant collection from raw (no OpenAI)
 fish prism-reembed --limit 100 --like "%Interaction Café%,%Burn CREW%"
 
 # 7. Eval

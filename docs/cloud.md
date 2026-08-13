@@ -6,10 +6,11 @@ Canonical **`fish.db`** lives on GCP **`mcp-services`**, not on the laptop. Phon
 
 | Path (VM) | Purpose |
 |-----------|---------|
-| `/data/fish/fish.db` | Corpus + training samples (GCP PD `fish-data`, 100 GB) |
+| `/data/fish/fish.db` | Corpus + training samples + `corpus_raw_embeddings` (GCP PD `fish-data`, 100 GB) |
 | `/data/fish/models/` | PRISM `.prz` adapters |
 | `/data/fish/imports/` | Drop zone for SMS/chat export uploads |
-| `/home/mcp/.config/fish/fish.env` | Secrets + `FISH_DATA_DIR` / `FISH_DB_PATH` |
+| `/data/fish/qdrant/` | Qdrant storage (Docker volume / bind mount) |
+| `/home/mcp/.config/fish/fish.env` | Secrets + `FISH_DATA_DIR` / `FISH_DB_PATH` / `FISH_QDRANT_URL` |
 | `/home/mcp/.config/fish/accounts.yaml` | IMAP accounts |
 
 Env on the VM:
@@ -17,6 +18,27 @@ Env on the VM:
 ```bash
 FISH_DATA_DIR=/data/fish
 FISH_DB_PATH=/data/fish/fish.db
+FISH_QDRANT_URL=http://127.0.0.1:6333
+```
+
+## Qdrant (ANN)
+
+Run Qdrant on the same VM as the corpus (localhost only):
+
+```bash
+sudo mkdir -p /data/fish/qdrant
+docker run -d --name fish-qdrant --restart unless-stopped \
+  -p 127.0.0.1:6333:6333 -p 127.0.0.1:6334:6334 \
+  -v /data/fish/qdrant:/qdrant/storage \
+  qdrant/qdrant:latest
+```
+
+One-time migrate from legacy sqlite-vec tables:
+
+```bash
+fish qdrant-migrate --limit 1000   # smoke
+fish qdrant-migrate                # full (~113k)
+fish prism-reembed                 # active PRISM collection from raw
 ```
 
 ## One-time setup

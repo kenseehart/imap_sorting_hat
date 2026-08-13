@@ -17,7 +17,9 @@ Personal knowledge corpus with optional **PRISM** retrieval:
 
 **PRISM** trains dual adapters so \(\cos(A_q(q), A_c(c))\) predicts **RelevanceAgent** scores — not raw semantic similarity. See [`docs/prism.md`](docs/prism.md) and workspace `prism_whitepaper.md`.
 
-Storage: SQLite **`fish.db`** + `retrieval_models` registry — **`legacy` → `corpus_vec`** (raw \(c\)); **`{config}.{timestamp}` → per-model ANN**. Binary zip `.prz`. See [`docs/prism.md`](docs/prism.md).
+Storage: SQLite **`fish.db`** (documents + `corpus_raw_embeddings`) + **Qdrant** ANN
+(`retrieval_models`: **`legacy` → `fish_legacy`**; **`{config}.{timestamp}` → `fish_{…}`**).
+Binary zip `.prz`. See [`docs/prism.md`](docs/prism.md).
 
 **Production corpus:** canonical db on GCP `mcp-services` at `/data/fish/fish.db` (PD `fish-data`). See [`docs/cloud.md`](docs/cloud.md).
 
@@ -25,7 +27,7 @@ Storage: SQLite **`fish.db`** + `retrieval_models` registry — **`legacy` → `
 
 - **Sync**: `imapclient` → `messages` + mirrored `corpus_items` (kind=email) — **cloud cron on mcp-services**
 - **Import**: `fish import-corpus` — SMS, ChatGPT, Claude — see [`docs/import-runbook.md`](docs/import-runbook.md)
-- **Search**: raw ANN on `corpus_vec`, or adapted-cosine ANN when a PRISM model is active; **hard metadata filters** (`--since`, `--until`, `--from`, `--account`, …). No keyword hybrid ranking (deferred).
+- **Search**: Qdrant ANN (raw or PRISM-adapted); metadata filters applied **in** the vector query (`--since`, `--until`, `--from`, `--account`, …). No keyword hybrid ranking (deferred).
 - **MCP (remote)**: `https://mcp.seehart.com/fish/mcp` (Claude.ai connector)
 - **MCP (local dev)**: `python -m fish.mcp_server` — optional; reads local db unless `FISH_DB_PATH` set
 - **Training**: RelevanceAgent labels → `fish prism-train` (MSE) → `.prz`; then `fish prism-reembed` (from stored raw, no OpenAI) — see [`docs/prism.md`](docs/prism.md), [`docs/cloud.md`](docs/cloud.md)
@@ -89,7 +91,9 @@ fish connect <email>
 | `fish memory` / MCP | `fish_memory_upsert` for agent memories |
 | `fish embedding-get <id>` | Stored embedding vector for a corpus item |
 | `fish prism-train` | Train PRISM adapters (MSE vs RelevanceAgent) → `personal.prz` |
-| `fish prism-reembed` | Rewrite `corpus_vec_prism` from raw `corpus_vec` (no OpenAI); `--limit` / `--like` / `--since` for smoke tests |
+| `fish prism-reembed` | Rewrite PRISM Qdrant collection from `corpus_raw_embeddings` (no OpenAI); `--limit` / `--like` / `--since` for smoke tests |
+| `fish qdrant-migrate` | One-shot: copy sqlite-vec → `corpus_raw_embeddings` + upsert legacy Qdrant collection |
+| `fish qdrant-reindex` | Upsert `corpus_raw_embeddings` into legacy Qdrant collection |
 | `fish corpus collect` | `--retriever legacy\|personal`, synthesize queries, top-k samples |
 | `fish corpus inject-positives` | Force (query, doc) pairs into training set (cold-start) |
 | `fish corpus label` | RelevanceAgent labels (`target_relevance`) |
@@ -112,8 +116,9 @@ Write: `fish_sync_run`, `fish_message_move`, `fish_message_archive`, `fish_bulk_
 | File | Purpose |
 |------|---------|
 | `~/.config/fish/accounts.yaml` | IMAP/SMTP accounts |
-| `~/.config/fish/fish.env` | `OPENAI_API_KEY`, optional `FISH_PRISM_MODEL`, `FISH_DATA_DIR`, `FISH_DB_PATH` |
-| `fish.db` | Corpus + IMAP state — **cloud:** `/data/fish/fish.db`; **local dev:** `~/.config/fish/fish.db` |
+| `~/.config/fish/fish.env` | `OPENAI_API_KEY`, `FISH_QDRANT_URL`, optional `FISH_PRISM_MODEL`, `FISH_DATA_DIR`, `FISH_DB_PATH` |
+| `fish.db` | Corpus + IMAP state + raw embeddings — **cloud:** `/data/fish/fish.db`; **local dev:** `~/.config/fish/fish.db` |
+| Qdrant | ANN indexes — **cloud:** Docker on `mcp-services` (`FISH_QDRANT_URL=http://127.0.0.1:6333`) |
 | `models/` | PRISM `.prz` files — **cloud:** `/data/fish/models/` |
 | `~/.config/fish/context_rules.yaml` | Context-based retrieval boosts |
 | `imports/` | Drop zone for export files — **cloud:** `/data/fish/imports/` |

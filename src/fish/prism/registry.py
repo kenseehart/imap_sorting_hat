@@ -1,4 +1,4 @@
-"""Retrieval model registry: legacy (raw cosine) + PRISM model_id → vec table + .prz."""
+"""Retrieval model registry: legacy (raw cosine) + PRISM model_id → Qdrant collection + .prz."""
 
 from __future__ import annotations
 
@@ -8,20 +8,28 @@ from typing import Any
 from fish.config import models_dir
 from fish.prism.configs import (
     LEGACY_MODEL_ID,
-    LEGACY_VEC_TABLE,
     make_model_id,
     parse_model_id,
     vec_table_for_model_id,
 )
-from fish.store import _ensure_vec_table, _utcnow
+from fish.qdrant_store import ensure_collection
+from fish.store import _utcnow
 
 
 def ensure_legacy_model(db: sqlite3.Connection) -> None:
+    collection = vec_table_for_model_id(LEGACY_MODEL_ID)
     row = db.execute(
-        "SELECT model_id FROM retrieval_models WHERE model_id = ?",
+        "SELECT model_id, vec_table FROM retrieval_models WHERE model_id = ?",
         (LEGACY_MODEL_ID,),
     ).fetchone()
     if row:
+        # Migrate old sqlite-vec table names to Qdrant collection names
+        if row["vec_table"] != collection:
+            db.execute(
+                "UPDATE retrieval_models SET vec_table = ? WHERE model_id = ?",
+                (collection, LEGACY_MODEL_ID),
+            )
+        ensure_collection(collection)
         return
     db.execute(
         """
@@ -29,9 +37,9 @@ def ensure_legacy_model(db: sqlite3.Connection) -> None:
             model_id, config_name, vec_table, prz_name, created_at, active, meta_json
         ) VALUES (?, ?, ?, NULL, ?, 1, NULL)
         """,
-        (LEGACY_MODEL_ID, LEGACY_MODEL_ID, LEGACY_VEC_TABLE, _utcnow()),
+        (LEGACY_MODEL_ID, LEGACY_MODEL_ID, collection, _utcnow()),
     )
-    _ensure_vec_table(db, LEGACY_VEC_TABLE)
+    ensure_collection(collection)
 
 
 def list_retrieval_models(db: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -72,7 +80,7 @@ def register_prism_model(
     activate: bool = True,
     timestamp: str | None = None,
 ) -> dict[str, Any]:
-    """Create model_id, vec table, registry row. prz file written separately by train."""
+    """Create model_id, Qdrant collection, registry row. prz written separately by train."""
     ensure_legacy_model(db)
     model_id = make_model_id(config_name, timestamp=timestamp)
     parse_model_id(model_id)  # validate
@@ -99,7 +107,7 @@ def register_prism_model(
             meta_json,
         ),
     )
-    _ensure_vec_table(db, vec_table)
+    ensure_collection(vec_table)
     row = get_retrieval_model(db, model_id)
     assert row is not None
     return row
@@ -133,5 +141,14 @@ def prz_path_for_model(model: dict[str, Any]) -> Any:
 
 
 def ensure_model_vec_tables(db: sqlite3.Connection) -> None:
+    """Ensure Qdrant collections exist for every registered model."""
     for model in list_retrieval_models(db):
-        _ensure_vec_table(db, model["vec_table"])
+        ensure_collection(model["vec_table"])
+        # Heal registry if still pointing at old sqlite-vec names
+        expected = vec_table_for_model_id(model["model_id"])
+        if model["vec_table"] != expected:
+            db.execute(
+                "UPDATE retrieval_models SET vec_table = ? WHERE model_id = ?",
+                (expected, model["model_id"]),
+            )
+            ensure_collection(expected)
