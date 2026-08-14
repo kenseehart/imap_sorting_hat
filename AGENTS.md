@@ -91,9 +91,9 @@ fish connect <email>
 | `fish memory` / MCP | `fish_memory_upsert` for agent memories |
 | `fish embedding-get <id>` | Stored embedding vector for a corpus item |
 | `fish prism-train` | Train PRISM adapters (MSE vs RelevanceAgent) → `personal.prz` |
-| `fish prism-reembed` | Rewrite PRISM Qdrant collection from `corpus_raw_embeddings` (no OpenAI); `--limit` / `--like` / `--since` for smoke tests |
+| `fish prism-reembed` | Rewrite PRISM Qdrant collection from raw (streamed, skips existing; `--force` rewrites); `--limit` / `--like` / `--since` for smoke |
 | `fish qdrant-migrate` | One-shot: copy sqlite-vec → `corpus_raw_embeddings` + upsert legacy Qdrant collection |
-| `fish qdrant-reindex` | Upsert `corpus_raw_embeddings` into legacy Qdrant collection |
+| `fish qdrant-reindex` | Upsert `corpus_raw_embeddings` into legacy Qdrant (skips existing ids; `--force` rewrites) |
 | `fish corpus collect` | `--retriever legacy\|personal`, synthesize queries, top-k samples |
 | `fish corpus inject-positives` | Force (query, doc) pairs into training set (cold-start) |
 | `fish corpus label` | RelevanceAgent labels (`target_relevance`) |

@@ -361,14 +361,23 @@ def prism_reembed(
     since: str | None = optarg(
         None, long_flag="--since", help="Only items with occurred_at >= ISO date"
     ),
+    batch_size: int = optarg(
+        128, long_flag="--batch-size", help="Qdrant upsert batch size"
+    ),
     no_progress: bool = optarg(
         False, long_flag="--no-progress", action="store_true", help="Disable progress bars"
+    ),
+    force: bool = optarg(
+        False,
+        long_flag="--force",
+        action="store_true",
+        help="Re-upsert points even if they already exist in Qdrant",
     ),
     *,
     json_output: bool = False,
     md_output: bool = False,
 ) -> int:
-    """Re-index a PRISM model's Qdrant collection from corpus_raw_embeddings (no OpenAI)."""
+    """Re-index a PRISM model's Qdrant collection from corpus_raw_embeddings (resumable)."""
     from fish.prism.reembed import prism_reembed as run_reembed
 
     load_env()
@@ -382,6 +391,8 @@ def prism_reembed(
             limit=limit,
             like=like_list,
             since=since,
+            batch_size=batch_size,
+            force=force,
         )
     except Exception as exc:
         print(exc, file=sys.stderr)
@@ -456,11 +467,17 @@ def qdrant_reindex(
     no_progress: bool = optarg(
         False, long_flag="--no-progress", action="store_true", help="Disable progress bars"
     ),
+    force: bool = optarg(
+        False,
+        long_flag="--force",
+        action="store_true",
+        help="Re-upsert points even if they already exist in Qdrant",
+    ),
     *,
     json_output: bool = False,
     md_output: bool = False,
 ) -> int:
-    """Upsert corpus_raw_embeddings into the legacy Qdrant collection."""
+    """Upsert corpus_raw_embeddings into the legacy Qdrant collection (resumable)."""
     from fish.qdrant_migrate import reindex_legacy_qdrant
 
     load_env()
@@ -471,6 +488,7 @@ def qdrant_reindex(
             batch_size=batch_size,
             show_progress=not no_progress,
             kinds=kind_list,
+            force=force,
         )
     except Exception as exc:
         print(exc, file=sys.stderr)

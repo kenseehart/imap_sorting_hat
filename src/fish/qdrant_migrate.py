@@ -8,6 +8,7 @@ from cmdline.progress import progress_bar
 
 from fish.prism.configs import LEGACY_MODEL_ID
 from fish.qdrant_store import (
+    all_point_ids,
     build_payload,
     collection_point_count,
     ensure_collection,
@@ -130,8 +131,13 @@ def reindex_legacy_qdrant(
     batch_size: int = 256,
     show_progress: bool = True,
     kinds: list[str] | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
-    """Upsert corpus_raw_embeddings into the legacy Qdrant collection (streamed)."""
+    """Upsert corpus_raw_embeddings into the legacy Qdrant collection (streamed).
+
+    Resumable: by default, point ids already in the collection are skipped
+    (no re-decode, no re-upsert). Pass ``force=True`` to rewrite every point.
+    """
     init_db()
     with fish_write_lock("train"):
         with db_conn() as db:
@@ -142,6 +148,10 @@ def reindex_legacy_qdrant(
                 raise RuntimeError("legacy model missing")
             collection = model["vec_table"]
             ensure_collection(collection)
+
+            already: set[int] = set()
+            if not force:
+                already = all_point_ids(collection)
 
             count_sql = """
                 SELECT COUNT(*) FROM corpus_raw_embeddings r
@@ -164,31 +174,54 @@ def reindex_legacy_qdrant(
                 disable=not show_progress,
             )
             upserted = 0
+            skipped_existing = 0
+            scanned = 0
             last_id = 0
-            while upserted < total:
-                chunk = min(batch_size, total - upserted)
-                sql = """
-                    SELECT c.id, c.kind, c.source, c.occurred_at, c.payload, r.embedding
+            while scanned < total:
+                chunk = min(batch_size, total - scanned)
+                id_sql = """
+                    SELECT c.id
                     FROM corpus_raw_embeddings r
                     JOIN corpus_items c ON c.id = r.item_id
                     WHERE c.id > ?
                 """
-                params: list[Any] = [last_id]
+                id_params: list[Any] = [last_id]
                 if kinds:
                     placeholders = ",".join("?" for _ in kinds)
-                    sql += f" AND c.kind IN ({placeholders})"
-                    params.extend(kinds)
-                sql += " ORDER BY c.id ASC LIMIT ?"
-                params.append(chunk)
-                rows = db.execute(sql, params).fetchall()
-                if not rows:
+                    id_sql += f" AND c.kind IN ({placeholders})"
+                    id_params.extend(kinds)
+                id_sql += " ORDER BY c.id ASC LIMIT ?"
+                id_params.append(chunk)
+                id_rows = db.execute(id_sql, id_params).fetchall()
+                if not id_rows:
                     break
+                page_ids = [int(r[0]) for r in id_rows]
+                last_id = page_ids[-1]
+                scanned += len(page_ids)
+
+                to_load = [i for i in page_ids if i not in already]
+                skipped = len(page_ids) - len(to_load)
+                if skipped:
+                    skipped_existing += skipped
+                    bar.update(skipped)
+                if not to_load:
+                    continue
+
+                placeholders = ",".join("?" for _ in to_load)
+                row_sql = f"""
+                    SELECT c.id, c.kind, c.source, c.occurred_at, c.payload, r.embedding
+                    FROM corpus_raw_embeddings r
+                    JOIN corpus_items c ON c.id = r.item_id
+                    WHERE c.id IN ({placeholders})
+                    ORDER BY c.id ASC
+                """
+                rows = db.execute(row_sql, to_load).fetchall()
                 batch: list[tuple[int, list[float], dict[str, Any]]] = []
                 for row in rows:
                     item_id = int(row["id"])
-                    last_id = item_id
                     emb = blob_to_embedding(row["embedding"])
                     if not emb:
+                        bar.update(1)
                         continue
                     corpus = {
                         "id": item_id,
@@ -201,13 +234,17 @@ def reindex_legacy_qdrant(
                 if batch:
                     upsert_points_batch(collection, batch)
                     upserted += len(batch)
+                    already.update(item_id for item_id, _, _ in batch)
                     bar.update(len(batch))
             bar.close()
             count = collection_point_count(collection)
     return {
         "collection": collection,
         "upserted": upserted,
+        "skipped_existing": skipped_existing,
+        "scanned": scanned,
         "points_in_collection": count,
+        "force": force,
         "limit": limit,
     }
 
@@ -234,5 +271,6 @@ def migrate_to_qdrant(
             limit=limit,
             batch_size=batch_size,
             show_progress=show_progress,
+            force=False,
         )
     return result

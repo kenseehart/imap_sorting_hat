@@ -31,6 +31,8 @@ frozen OpenAI vectors \(c\) live in SQLite `corpus_raw_embeddings`.
 - Delete / supersede calls `unindex_corpus_item` across raw SQLite + all Qdrant collections
 - `fish index-cleanup` removes orphan points / raw rows
 - Corrupt recovery: `wipe_all_vector_indexes` deletes/recreates Qdrant collections (keeps `corpus_raw_embeddings`); then `fish qdrant-reindex` / `fish prism-reembed`
+- `fish qdrant-reindex` is **resumable**: existing point ids are skipped; use `--force` to rewrite all
+- `fish prism-reembed` is **resumable** the same way (streamed pages + skip existing; `--force` rewrites)
 - One-time from sqlite-vec: `fish qdrant-migrate` (copy blobs + upsert legacy collection)
 
 ## Training pipeline (start small)

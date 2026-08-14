@@ -245,14 +245,36 @@ def get_point_vector(collection: str, item_id: int) -> list[float] | None:
 
 
 def point_exists(collection: str, item_id: int) -> bool:
+    return int(item_id) in existing_point_ids(collection, [int(item_id)])
+
+
+def existing_point_ids(collection: str, ids: list[int]) -> set[int]:
+    """Return the subset of ``ids`` that already exist in the collection."""
+    if not ids:
+        return set()
     client = get_qdrant_client()
     names = {c.name for c in client.get_collections().collections}
     if collection not in names:
-        return False
-    points = client.retrieve(
-        collection_name=collection, ids=[int(item_id)], with_vectors=False
-    )
-    return bool(points)
+        return set()
+    found: set[int] = set()
+    # retrieve accepts large id lists; chunk to keep requests bounded
+    chunk = 256
+    for i in range(0, len(ids), chunk):
+        batch = [int(x) for x in ids[i : i + chunk]]
+        points = client.retrieve(
+            collection_name=collection,
+            ids=batch,
+            with_vectors=False,
+            with_payload=False,
+        )
+        for p in points:
+            found.add(int(p.id))
+    return found
+
+
+def all_point_ids(collection: str) -> set[int]:
+    """Scroll every point id in the collection (vectors/payload omitted)."""
+    return set(scroll_ids(collection, limit=None))
 
 
 def _build_filter(
@@ -363,23 +385,34 @@ def collection_point_count(collection: str) -> int:
     return int(info.points_count or 0)
 
 
-def scroll_ids(collection: str, *, limit: int = 10_000) -> list[int]:
+def scroll_ids(collection: str, *, limit: int | None = None) -> list[int]:
+    """Scroll point ids. ``limit=None`` means the entire collection."""
     client = get_qdrant_client()
     names = {c.name for c in client.get_collections().collections}
     if collection not in names:
         return []
     ids: list[int] = []
     offset = None
+    page = 256
     while True:
+        if limit is not None:
+            remaining = limit - len(ids)
+            if remaining <= 0:
+                break
+            page_limit = min(page, remaining)
+        else:
+            page_limit = page
         points, offset = client.scroll(
             collection_name=collection,
-            limit=min(256, limit - len(ids)),
+            limit=page_limit,
             offset=offset,
             with_payload=False,
             with_vectors=False,
         )
         for p in points:
             ids.append(int(p.id))
-        if offset is None or len(ids) >= limit:
+        if offset is None:
+            break
+        if limit is not None and len(ids) >= limit:
             break
     return ids
