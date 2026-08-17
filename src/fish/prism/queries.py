@@ -25,7 +25,7 @@ def log_real_query(
     *,
     query_embedding: list[float] | None = None,
 ) -> int | None:
-    """Record a real search query. Returns query id or None if duplicate."""
+    """Record a logged (gold) search query. Returns query id or None if duplicate."""
     init_db()
     ctx_str: str | None
     if context_json is None:
@@ -39,8 +39,9 @@ def log_real_query(
         query_id = insert_training_query(
             db,
             text=query,
-            origin="real",
+            origin="gold",
             context_json=ctx_str,
+            source="logged",
         )
         if query_id is None:
             return None

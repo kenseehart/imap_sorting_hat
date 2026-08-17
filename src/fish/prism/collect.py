@@ -114,6 +114,7 @@ def collect_samples(
         prism_model = load_prism_model(retriever)
 
     samples_created = 0
+    samples_updated = 0
     queries_processed = 0
     raw_cache: dict[int, list[float]] = {}
 
@@ -152,11 +153,14 @@ def collect_samples(
                 )
                 if sample_id is not None:
                     samples_created += 1
+                else:
+                    samples_updated += 1
 
     result: dict[str, Any] = {
         "retriever": retriever,
         "queries_processed": queries_processed,
         "samples_created": samples_created,
+        "samples_updated": samples_updated,
     }
     if label:
         result["labeling"] = label_batch(limit=label_limit)

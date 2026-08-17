@@ -69,7 +69,7 @@ def inject_positives(
     sample_ids: list[int] = []
     matched_ids: list[int] = []
     with db_conn() as db:
-        qrow = get_training_query_by_text(db, query, origin="real")
+        qrow = get_training_query_by_text(db, query, origin="gold")
         if not qrow:
             qrow = get_training_query_by_text(db, query, origin=None)
         if not qrow:

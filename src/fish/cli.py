@@ -12,7 +12,7 @@ from fish.write_lock import FishWriteLockError, read_lock_status
 from fish.connect import connect_interactive
 from fish.search import search_corpus, search_messages
 from fish.store import db_conn, init_db, sync_status
-from fish.sync import embed_all_pending, sync_all, sync_account
+from fish.sync import embed_all_pending, embed_field_pending, sync_all, sync_account
 
 
 @cmd
@@ -282,9 +282,13 @@ def import_corpus(
 @cmd(output=True)
 def prism_train(
     config: str = optarg(
-        "personal", long_flag="--config", help="PRISM config name from prism_models.yaml"
+        "smoke_combined", long_flag="--config", help="PRISM config name from prism_models.yaml"
     ),
-    epochs: int | None = optarg(None, long_flag="--epochs", help="Override config epochs"),
+    epochs: int | None = optarg(
+        None,
+        long_flag="--epochs",
+        help="Max epochs (ceiling). Personal configs also early-stop on holdout Spearman.",
+    ),
     output: str | None = optarg(
         None, long_flag="--output", help="Output .prz path (default models/{model_id}.prz)"
     ),
@@ -311,6 +315,24 @@ def prism_train(
     label_limit: int = optarg(
         500, long_flag="--label-limit", help="Label limit when --collect-first"
     ),
+    overfit: bool = optarg(
+        False,
+        long_flag="--overfit",
+        action="store_true",
+        help="No holdout — train and eval on the full labeled set (smoke pipeline check)",
+    ),
+    fresh: bool = optarg(
+        False,
+        long_flag="--fresh",
+        action="store_true",
+        help="Ignore/delete any in-progress checkpoint and start a new model_id",
+    ),
+    no_resume: bool = optarg(
+        False,
+        long_flag="--no-resume",
+        action="store_true",
+        help="Do not auto-resume from models/checkpoints/{config}.pt",
+    ),
     *,
     json_output: bool = False,
     md_output: bool = False,
@@ -332,6 +354,9 @@ def prism_train(
             min_queries=min_queries,
             top_k=top_k,
             label_limit=label_limit,
+            overfit=overfit,
+            resume=not no_resume,
+            fresh=fresh,
         )
     except Exception as exc:
         print(exc, file=sys.stderr)
@@ -655,11 +680,23 @@ def embed(
         None, long_flag="--like", help="Comma-separated SQL LIKE filters on text"
     ),
     since: str | None = optarg(None, long_flag="--since", help="occurred_at >= ISO date"),
+    fields: bool = optarg(
+        False,
+        long_flag="--fields",
+        action="store_true",
+        help="Backfill header/body raw embeddings only (SQLite; items that already have combined)",
+    ),
+    training_only: bool = optarg(
+        False,
+        long_flag="--training-only",
+        action="store_true",
+        help="With --fields: only labeled training_samples corpus items",
+    ),
     no_progress: bool = optarg(
         False, long_flag="--no-progress", action="store_true", help="Disable progress bars"
     ),
 ) -> int:
-    """Embed corpus items missing from the legacy raw ANN index."""
+    """Embed corpus items: combined→SQLite+Qdrant; header/body→SQLite only."""
     load_env()
     try:
         ensure_openai_api_key(interactive=False)
@@ -667,6 +704,44 @@ def embed(
         print(exc, file=sys.stderr)
         return 1
     init_db()
+    if fields:
+        from cmdline.progress import progress_bar
+        from fish.store import (
+            backfill_corpus_header_json,
+            count_corpus_needing_field_embeddings,
+            db_conn,
+        )
+
+        with db_conn() as db:
+            headers_filled = backfill_corpus_header_json(
+                db, training_only=training_only
+            )
+            total = count_corpus_needing_field_embeddings(
+                db, training_only=training_only
+            )
+        if headers_filled:
+            print(f"header_json_backfilled={headers_filled}")
+        if limit is not None:
+            total = min(total, int(limit))
+        done = 0
+        bar = progress_bar(
+            total=total or None,
+            desc="field embeds",
+            unit="msg",
+            disable=no_progress,
+        )
+        while True:
+            if limit is not None and done >= limit:
+                break
+            batch = 100 if limit is None else min(100, int(limit) - done)
+            n = embed_field_pending(batch_size=batch, training_only=training_only)
+            if n == 0:
+                break
+            done += n
+            bar.update(n)
+        bar.close()
+        print(f"field_embedded={done}")
+        return 0
     kind_list = [k.strip() for k in kinds.split(",")] if kinds else None
     like_list = [p.strip() for p in like.split(",") if p.strip()] if like else None
     count = embed_all_pending(
@@ -714,6 +789,94 @@ def backfill(
             f"{result['account']}: fetched={result['fetched']} "
             f"new/changed={result['new_or_changed']} embedded={result['embedded']}"
         )
+    return 0
+
+
+@cmd(output=True)
+def migrate_canonical_ids(
+    dry_run: bool = optarg(
+        False,
+        long_flag="--dry-run",
+        action="store_true",
+        help="Report what would change without writing",
+    ),
+    limit: int | None = optarg(
+        None,
+        long_flag="--limit",
+        type=int,
+        help="Max email corpus rows to rewrite (smoke)",
+    ),
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """Rewrite corpus source_key to ``{source_id}.{message_id}`` (keep integer PKs)."""
+    from fish.migrate_canonical_ids import migrate_canonical_ids as run_migrate
+    from fish.write_lock import fish_write_lock
+
+    load_env()
+    try:
+        with fish_write_lock("migrate-canonical-ids"):
+            stats = run_migrate(dry_run=dry_run, limit=limit)
+    except FishWriteLockError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    emit_output(
+        stats,
+        json_output=json_output,
+        md=md_output,
+        title="Fish migrate-canonical-ids",
+    )
+    return 0
+
+
+@cmd(output=True)
+def repair_headers(
+    dry_run: bool = optarg(
+        False,
+        long_flag="--dry-run",
+        action="store_true",
+        help="Report what would change without writing",
+    ),
+    missing_only: bool = optarg(
+        False,
+        long_flag="--missing-only",
+        action="store_true",
+        help="Only fill empty header_json (default: repair skewed ids >= 110920)",
+    ),
+    skip_neutralize: bool = optarg(
+        False,
+        long_flag="--skip-neutralize",
+        action="store_true",
+        help="Do not delete test:sms:1 collision row",
+    ),
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """Repair poisoned corpus header_json via source_key→message join (not id equality)."""
+    from fish.store import (
+        neutralize_test_sms_collision,
+        repair_corpus_header_json,
+    )
+    from fish.write_lock import fish_write_lock
+
+    load_env()
+    init_db()
+    try:
+        with fish_write_lock("repair-headers"):
+            with db_conn() as db:
+                headers = repair_corpus_header_json(
+                    db, missing_only=missing_only, dry_run=dry_run
+                )
+                neutralize = None
+                if not skip_neutralize:
+                    neutralize = neutralize_test_sms_collision(db, dry_run=dry_run)
+    except FishWriteLockError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    payload = {"headers": headers, "neutralize": neutralize}
+    emit_output(payload, json_output=json_output, md=md_output, title="Fish repair-headers")
     return 0
 
 

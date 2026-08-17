@@ -216,10 +216,24 @@ def fetch_messages(client: IMAPClient, uids: list[int], *, gmail: bool = False) 
         return {}
     meta_items: list = [HEADER_KEY, "BODYSTRUCTURE", "FLAGS", "RFC822.SIZE"]
     if gmail:
-        meta_items.append("X-GM-LABELS")
+        meta_items.extend(["X-GM-LABELS", "X-GM-MSGID"])
     meta = client.fetch(uids, meta_items)
     result: dict[int, dict] = {}
     small_uids: list[int] = []
+
+    def _gmail_fields(data: dict) -> dict:
+        out: dict = {}
+        if not gmail:
+            return out
+        out["gmail_labels"] = _decode_gmail_labels(
+            data.get(b"X-GM-LABELS") or data.get("X-GM-LABELS")
+        )
+        raw_gm = data.get(b"X-GM-MSGID")
+        if raw_gm is None:
+            raw_gm = data.get("X-GM-MSGID")
+        if raw_gm is not None:
+            out["gm_msgid"] = raw_gm
+        return out
 
     for uid, data in meta.items():
         uid_int = int(uid)
@@ -228,14 +242,12 @@ def fetch_messages(client: IMAPClient, uids: list[int], *, gmail: bool = False) 
         structure = data.get(b"BODYSTRUCTURE")
         size = int(data.get(b"RFC822.SIZE") or message_size_bytes(structure))
         sections = iter_text_part_sections(structure)
+        gmail_extra = _gmail_fields(data)
 
         if size <= LARGE_MESSAGE_BYTES or not sections:
             small_uids.append(uid_int)
             entry: dict = {"header": header, "flags": flags, "_pending_body": True}
-            if gmail:
-                entry["gmail_labels"] = _decode_gmail_labels(
-                    data.get(b"X-GM-LABELS") or data.get("X-GM-LABELS")
-                )
+            entry.update(gmail_extra)
             result[uid_int] = entry
             continue
 
@@ -247,18 +259,12 @@ def fetch_messages(client: IMAPClient, uids: list[int], *, gmail: bool = False) 
         text_parts = _extract_text_parts(parts_row or {}, sections)
         if text_parts:
             entry = {"header": header, "flags": flags, "text_parts": text_parts}
-            if gmail:
-                entry["gmail_labels"] = _decode_gmail_labels(
-                    data.get(b"X-GM-LABELS") or data.get("X-GM-LABELS")
-                )
+            entry.update(gmail_extra)
             result[uid_int] = entry
         else:
             small_uids.append(uid_int)
             entry = {"header": header, "flags": flags, "_pending_body": True}
-            if gmail:
-                entry["gmail_labels"] = _decode_gmail_labels(
-                    data.get(b"X-GM-LABELS") or data.get("X-GM-LABELS")
-                )
+            entry.update(gmail_extra)
             result[uid_int] = entry
 
     if small_uids:

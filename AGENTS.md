@@ -17,7 +17,8 @@ Personal knowledge corpus with optional **PRISM** retrieval:
 
 **PRISM** trains dual adapters so \(\cos(A_q(q), A_c(c))\) predicts **RelevanceAgent** scores — not raw semantic similarity. See [`docs/prism.md`](docs/prism.md) and workspace `prism_whitepaper.md`.
 
-Storage: SQLite **`fish.db`** (documents + `corpus_raw_embeddings`) + **Qdrant** ANN
+Storage: SQLite **`fish.db`** (documents + durable raw embeds: combined / header / body)
++ **Qdrant** ANN for combined/adapted vectors only
 (`retrieval_models`: **`legacy` → `fish_legacy`**; **`{config}.{timestamp}` → `fish_{…}`**).
 Binary zip `.prz`. See [`docs/prism.md`](docs/prism.md).
 
@@ -25,6 +26,7 @@ Binary zip `.prz`. See [`docs/prism.md`](docs/prism.md).
 
 ## Architecture
 
+- **Identity**: `{source_id}.{message_id}` as `corpus_items.source_key` (UNIQUE); integer PK is surrogate for Qdrant/training only — see [`docs/identity.md`](docs/identity.md)
 - **Sync**: `imapclient` → `messages` + mirrored `corpus_items` (kind=email) — **cloud cron on mcp-services**
 - **Import**: `fish import-corpus` — SMS, ChatGPT, Claude — see [`docs/import-runbook.md`](docs/import-runbook.md)
 - **Search**: Qdrant ANN (raw or PRISM-adapted); metadata filters applied **in** the vector query (`--since`, `--until`, `--from`, `--account`, …). No keyword hybrid ranking (deferred).
@@ -39,9 +41,15 @@ Real queries are logged automatically on every `fish search` / `fish_search` cal
 
 | Table | Purpose |
 |-------|---------|
-| `training_queries` | Real (logged searches), **gold** (curated), and synthetic queries |
+| `training_queries` | **gold** (logged searches), **curated** (JSONL seeds), **synth** (LLM expansions of gold) |
 
-Gold queries: `origin=gold`, plus `source` (e.g. `curated:email-kb:2026-08-13`) and `meta_json` (topics/intent). Seed file: `config/gold_queries.jsonl` — **email/knowledge search only** (what you'd send to `fish_search`, not Tesla/compute/CLI ops). Replace with `fish corpus add-gold --replace`.
+| `origin` | Meaning | Timestamp |
+|----------|---------|-----------|
+| `gold` | Actual logged searches | `created_at` at log time; `source=logged` |
+| `curated` | Hand-authored seeds from `config/gold_queries.jsonl` | `created_at` at load; `source` e.g. `curated:email-kb:2026-08-13` |
+| `synth` | LLM “like these but different” from gold | `created_at` at synth; `source=synth:…` |
+
+Load curated: `fish corpus add-curated` (alias: `add-gold`). Synth fills until `gold+synth ≥ --min-queries` (curated excluded from that count).
 | `training_samples` | (query, corpus item) pairs with metadata |
 
 Key sample fields:
@@ -60,10 +68,12 @@ fish corpus collect --retriever legacy --min-queries 50 --top-k 20
 fish corpus inject-positives --query "…" --like "%pattern%"   # cold-start hard positives
 fish corpus label --limit 500           # RelevanceAgent → target_relevance
 fish corpus stats
-fish prism-train                        # MSE(cos(Aq(q),Ac(c)), target_relevance)
+fish prism-train                        # MSE; resumable checkpoints under models/checkpoints/
 fish prism-reembed --limit 200           # re-index ANN from raw (smoke); no OpenAI
 fish prism-reembed                       # full re-index from raw_embedding
 ```
+
+`header_body` configs auto-prep field embeds for **labeled training items only** before train (not full corpus). Full corpus: `fish embed --fields`.
 
 Compare retrievers by collecting with `--retriever legacy` vs `--retriever personal` (separate runs).
 
@@ -90,7 +100,9 @@ fish connect <email>
 | `fish import-corpus <source> <path>` | Import `android-sms`, `chatgpt`, or `claude` |
 | `fish memory` / MCP | `fish_memory_upsert` for agent memories |
 | `fish embedding-get <id>` | Stored embedding vector for a corpus item |
-| `fish prism-train` | Train PRISM adapters (MSE vs RelevanceAgent) → `personal.prz` |
+| `fish embed` | Embed pending combined vectors (SQLite + Qdrant); also embeds header/body into SQLite |
+| `fish embed --fields` | Backfill `header_json` + header/body raw embeddings in SQLite only (no Qdrant) |
+| `fish prism-train` | Train PRISM adapters (MSE vs RelevanceAgent) → `{config}.{timestamp}.prz`; `--overfit` for smoke |
 | `fish prism-reembed` | Rewrite PRISM Qdrant collection from raw (streamed, skips existing; `--force` rewrites); `--limit` / `--like` / `--since` for smoke |
 | `fish qdrant-migrate` | One-shot: copy sqlite-vec → `corpus_raw_embeddings` + upsert legacy Qdrant collection |
 | `fish qdrant-reindex` | Upsert `corpus_raw_embeddings` into legacy Qdrant (skips existing ids; `--force` rewrites) |
@@ -98,11 +110,13 @@ fish connect <email>
 | `fish corpus inject-positives` | Force (query, doc) pairs into training set (cold-start) |
 | `fish corpus label` | RelevanceAgent labels (`target_relevance`) |
 | `fish corpus stats` | Query/sample counts |
-| `fish corpus queries` | Dump training queries (`--origin gold\|real\|synthetic`, `--source`, `--json`) |
-| `fish corpus add-gold` | Load curated gold JSONL (`config/gold_queries.jsonl`) into `training_queries` |
+| `fish corpus queries` | Dump training queries (`--origin gold\|curated\|synth`, `--source`, `--json`) |
+| `fish corpus add-curated` | Load `config/gold_queries.jsonl` as `origin=curated` (`add-gold` alias) |
 | `fish corpus purge` | Remove stale or superseded samples |
 | `fish corpus browse` | Local Datasette UI for `fish.db` (alias: `dbserv fish`) |
 | `fish sync` | IMAP sync + embed |
+| `fish repair-headers` | Rebuild email `header_json` via source_key→message (not id); neutralize `test:sms:1` |
+| `fish migrate-canonical-ids` | Rewrite `source_key` → `{source_id}.{message_id}` (keeps integer PKs); `--dry-run` |
 | `fish status` | Config, connectivity, corpus counts by kind |
 
 ## MCP tools

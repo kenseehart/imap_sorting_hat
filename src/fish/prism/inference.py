@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -86,3 +87,23 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
     if denom == 0:
         return 0.0
     return float(np.dot(va, vb) / denom)
+
+
+def compose_chunk_vector(
+    db: Any,
+    item_id: int,
+    chunk_repr: str,
+) -> list[float] | None:
+    """Frozen chunk vector from SQLite raw embeds for train / re-index."""
+    from fish.prism.model import CHUNK_REPR_COMBINED, CHUNK_REPR_HEADER_BODY
+    from fish.store import get_raw_embedding, get_raw_field_embeddings
+
+    if chunk_repr == CHUNK_REPR_COMBINED:
+        return get_raw_embedding(db, item_id)
+    if chunk_repr == CHUNK_REPR_HEADER_BODY:
+        fields = get_raw_field_embeddings(db, item_id)
+        h, b = fields.get("header"), fields.get("body")
+        if h is None or b is None:
+            return None
+        return list(h) + list(b)
+    raise ValueError(f"Unknown chunk_repr {chunk_repr!r}")

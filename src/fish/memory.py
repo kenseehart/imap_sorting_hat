@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from hashlib import sha256
 from typing import Any, Literal
 
 from openai import OpenAI
@@ -14,6 +13,7 @@ from fish.config import (
     openai_api_key,
 )
 from fish.corpus import memory_corpus_item
+from fish.identity import memory_canonical_id
 from fish.embed import embed_text
 from fish.prism.inference import cosine_similarity
 from fish.store import (
@@ -37,7 +37,7 @@ def _utcnow() -> str:
 
 
 def _memory_source_key(fact: str) -> str:
-    return f"memory:{sha256(fact.strip().lower().encode()).hexdigest()[:24]}"
+    return memory_canonical_id(fact)
 
 
 def _memory_fact(row: dict[str, Any]) -> str:

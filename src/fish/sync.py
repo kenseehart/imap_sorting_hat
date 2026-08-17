@@ -54,18 +54,42 @@ def embed_pending(
             )
             if not pending:
                 return 0
-            texts = [row["text_for_embed"] for row in pending]
+            # Combined + header + body: durable OpenAI vectors in SQLite.
+            # Only the combined vector is also upserted to Qdrant (ANN).
+            texts: list[str] = []
+            slots: list[tuple[int, str]] = []  # (pending_index, kind)
+            for i, row in enumerate(pending):
+                texts.append(row["text_for_embed"] or "")
+                slots.append((i, "combined"))
+                header = (row.get("header_json") or "").strip()
+                body = (row.get("body_text") or "").strip()
+                texts.append(header if header else (row["text_for_embed"] or ""))
+                slots.append((i, "header"))
+                texts.append(body if body else (row["text_for_embed"] or ""))
+                slots.append((i, "body"))
             vectors = embed_texts(texts)
-            for row, vector in zip(pending, vectors):
-                from fish.config import active_prism_model_id
-                from fish.prism.configs import LEGACY_MODEL_ID
-                from fish.prism.inference import adapt_chunk_for_model
+            by_item: dict[int, dict[str, list[float]]] = {}
+            for (i, kind), vector in zip(slots, vectors):
+                by_item.setdefault(i, {})[kind] = vector
+            from fish.config import active_prism_model_id
+            from fish.prism.configs import LEGACY_MODEL_ID
+            from fish.prism.inference import adapt_chunk_for_model
 
+            for i, row in enumerate(pending):
+                parts = by_item[i]
+                combined = parts["combined"]
                 model_vecs: dict[str, list[float]] = {}
                 mid = active_prism_model_id()
                 if mid and mid != LEGACY_MODEL_ID:
-                    model_vecs[mid] = adapt_chunk_for_model(vector, mid)
-                set_corpus_embedding(db, int(row["id"]), vector, model_embeddings=model_vecs)
+                    model_vecs[mid] = adapt_chunk_for_model(combined, mid)
+                set_corpus_embedding(
+                    db,
+                    int(row["id"]),
+                    combined,
+                    header_embedding=parts.get("header"),
+                    body_embedding=parts.get("body"),
+                    model_embeddings=model_vecs,
+                )
                 embedded += 1
     except AuthenticationError:
         if not auth_retry:
@@ -81,6 +105,56 @@ def embed_pending(
             since=since,
         )
     return embedded
+
+
+def embed_field_pending(
+    batch_size: int = EMBED_BATCH, *, training_only: bool = False
+) -> int:
+    """Backfill header/body raw embeddings for rows that already have combined.
+
+    Writes to SQLite only — does not touch Qdrant (field vectors are not ANN indexes).
+    """
+    from fish.store import corpus_needing_field_embeddings, set_raw_field_embeddings
+
+    init_db()
+    with db_conn() as db:
+        pending = corpus_needing_field_embeddings(
+            db, limit=batch_size, training_only=training_only
+        )
+        if not pending:
+            return 0
+        texts: list[str] = []
+        slots: list[tuple[int, str]] = []
+        for i, row in enumerate(pending):
+            header = (row.get("header_json") or "").strip()
+            body = (row.get("body_text") or "").strip()
+            fallback = row.get("text_for_embed") or ""
+            # Only request missing fields
+            if row.get("header_embedding") is None:
+                texts.append(header if header else fallback)
+                slots.append((i, "header"))
+            if row.get("body_embedding") is None:
+                texts.append(body if body else fallback)
+                slots.append((i, "body"))
+        if not texts:
+            return 0
+        vectors = embed_texts(texts)
+        by_item: dict[int, dict[str, list[float]]] = {}
+        for (i, kind), vector in zip(slots, vectors):
+            by_item.setdefault(i, {})[kind] = vector
+        n = 0
+        for i, row in enumerate(pending):
+            parts = by_item.get(i) or {}
+            if not parts:
+                continue
+            set_raw_field_embeddings(
+                db,
+                int(row["id"]),
+                header_embedding=parts.get("header"),
+                body_embedding=parts.get("body"),
+            )
+            n += 1
+    return n
 
 
 def embed_all_pending(

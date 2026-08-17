@@ -9,7 +9,14 @@ from cmdline import cmd_group, emit_output, optarg
 from fish.config import ensure_openai_api_key, load_env
 from fish.prism.collect import collect_samples
 from fish.prism.relevance import label_batch
-from fish.store import db_conn, init_db, mark_stale_samples, purge_training_samples, training_corpus_stats
+from fish.store import (
+    db_conn,
+    dedupe_training_sample_pairs,
+    init_db,
+    mark_stale_samples,
+    purge_training_samples,
+    training_corpus_stats,
+)
 from fish.write_lock import fish_write_lock
 
 corpus = cmd_group("corpus", help="PRISM training corpus (queries, samples, labeling)")
@@ -67,13 +74,25 @@ def collect(
 def label(
     limit: int = optarg(500, long_flag="--limit", help="Max samples to label"),
     force: bool = optarg(
-        False, long_flag="--force", action="store_true", help="Re-label even if agent version matches"
+        False,
+        long_flag="--force",
+        action="store_true",
+        help="Re-label even when target_relevance is already set",
+    ),
+    concurrency: int | None = optarg(
+        None,
+        long_flag="--concurrency",
+        help=(
+            "Parallel OpenAI RelevanceAgent calls "
+            "(default: FISH_LABEL_CONCURRENCY or 16). "
+            "Does not hold the Fish write lock across API waits."
+        ),
     ),
     *,
     json_output: bool = False,
     md_output: bool = False,
 ) -> int:
-    """Run RelevanceAgent on unlabeled training samples."""
+    """Run RelevanceAgent on unlabeled training samples (null target_relevance only)."""
     load_env()
     try:
         ensure_openai_api_key(interactive=False)
@@ -81,8 +100,9 @@ def label(
         print(exc, file=sys.stderr)
         return 1
     try:
-        with fish_write_lock("corpus"):
-            result = label_batch(limit=limit, force=force)
+        # Short SQLite writes only — do not hold fish_write_lock across OpenAI
+        # waits so prism-train / sync can run concurrently.
+        result = label_batch(limit=limit, force=force, concurrency=concurrency)
     except Exception as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -160,7 +180,7 @@ def queries(
     origin: str | None = optarg(
         None,
         long_flag="--origin",
-        help="Filter: real | synthetic | gold (default: all)",
+        help="Filter: gold | curated | synth (default: all)",
     ),
     source: str | None = optarg(
         None, long_flag="--source", help="Filter by source string"
@@ -176,7 +196,7 @@ def queries(
     json_output: bool = False,
     md_output: bool = False,
 ) -> int:
-    """Dump training queries (gold/real/synthetic) with source and metadata."""
+    """Dump training queries (gold/curated/synth) with source, created_at, metadata."""
     from fish.prism.gold import dump_queries
 
     init_db()
@@ -210,7 +230,7 @@ def queries(
 
 
 @corpus.cmd(output=True)
-def add_gold(
+def add_curated(
     file: str | None = optarg(
         None,
         long_flag="--file",
@@ -231,13 +251,13 @@ def add_gold(
         False,
         long_flag="--replace",
         action="store_true",
-        help="Permanently delete all existing gold queries (and their samples), then load file",
+        help="Permanently delete all curated queries (and their samples), then load file",
     ),
     *,
     json_output: bool = False,
     md_output: bool = False,
 ) -> int:
-    """Load curated gold queries (origin=gold) from JSONL into training_queries."""
+    """Load curated queries (origin=curated) from JSONL into training_queries."""
     from pathlib import Path
 
     from fish.prism.gold import (
@@ -273,7 +293,76 @@ def add_gold(
     except Exception as exc:
         print(exc, file=sys.stderr)
         return 1
-    emit_output(result, json_output=json_output, md=md_output, title="Fish corpus add-gold")
+    emit_output(
+        result, json_output=json_output, md=md_output, title="Fish corpus add-curated"
+    )
+    return 0
+
+
+@corpus.cmd(output=True)
+def add_gold(
+    file: str | None = optarg(
+        None,
+        long_flag="--file",
+        help="JSONL path (default: fish/config/gold_queries.jsonl)",
+    ),
+    no_embed: bool = optarg(
+        False,
+        long_flag="--no-embed",
+        action="store_true",
+        help="Skip OpenAI embeddings (collect will embed later)",
+    ),
+    source: str | None = optarg(
+        None,
+        long_flag="--source",
+        help="Default source if a line omits source",
+    ),
+    replace: bool = optarg(
+        False,
+        long_flag="--replace",
+        action="store_true",
+        help="Permanently delete all curated queries (and their samples), then load file",
+    ),
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """Deprecated alias for add-curated (origin=curated)."""
+    return add_curated(
+        file=file,
+        no_embed=no_embed,
+        source=source,
+        replace=replace,
+        json_output=json_output,
+        md_output=md_output,
+    )
+
+
+@corpus.cmd(output=True)
+def dedupe_pairs(
+    dry_run: bool = optarg(
+        False,
+        long_flag="--dry-run",
+        action="store_true",
+        help="Report actions without writing",
+    ),
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """Collapse duplicate (query, item) samples; pair identity ignores retriever.
+
+    Keeps the best labeled row (prefer RA 2.0.0, else any label, else newest).
+    Backfills null relevance_agent_version to 1.0.0 on labeled rows. Losers are
+    superseded (not deleted).
+    """
+    init_db()
+    with fish_write_lock("corpus"):
+        with db_conn() as db:
+            result = dedupe_training_sample_pairs(db, dry_run=dry_run)
+    emit_output(
+        result, json_output=json_output, md=md_output, title="Fish corpus dedupe-pairs"
+    )
     return 0
 
 

@@ -90,5 +90,51 @@ def get_prism_config(config_name: str) -> dict[str, Any]:
     cfg.setdefault("lr", 2.0e-5)
     cfg.setdefault("batch_size", 64)
     cfg.setdefault("weight_decay", 0.01)
-    cfg.setdefault("residual_alpha_init", 0.9)
+    cfg.setdefault("chunk_repr", "combined")
+    cfg.setdefault("adapter_sharing", "dual")
+    cfg.setdefault("scoring", "cosine")
+    cfg.setdefault("head_hidden", 512)
+    # 0 = train all epochs; >0 = stop when holdout Spearman stalls this many epochs
+    cfg.setdefault("early_stop_patience", 0)
+    cfg.setdefault("early_stop_min_delta", 0.0)
+    chunk_repr = str(cfg["chunk_repr"])
+    if chunk_repr not in ("combined", "header_body"):
+        raise ValueError(
+            f"Config {config_name!r}: chunk_repr must be 'combined' or "
+            f"'header_body', got {chunk_repr!r}"
+        )
+    cfg["chunk_repr"] = chunk_repr
+    sharing = str(cfg["adapter_sharing"]).strip().lower()
+    if sharing not in ("dual", "siamese"):
+        raise ValueError(
+            f"Config {config_name!r}: adapter_sharing must be 'dual' or "
+            f"'siamese', got {cfg['adapter_sharing']!r}"
+        )
+    if sharing == "siamese" and chunk_repr != "combined":
+        raise ValueError(
+            f"Config {config_name!r}: siamese adapters require "
+            f"chunk_repr=combined (got {chunk_repr!r}); header_body needs "
+            f"asymmetric A_c input dim"
+        )
+    cfg["adapter_sharing"] = sharing
+    scoring = str(cfg["scoring"]).strip().lower()
+    if scoring not in ("cosine", "mlp_head"):
+        raise ValueError(
+            f"Config {config_name!r}: scoring must be 'cosine' or 'mlp_head', "
+            f"got {cfg['scoring']!r}"
+        )
+    if scoring == "mlp_head" and sharing == "siamese":
+        raise ValueError(
+            f"Config {config_name!r}: scoring=mlp_head requires dual adapters "
+            f"(personal_fields-style Aq||Ac)"
+        )
+    if scoring == "mlp_head" and chunk_repr != "header_body":
+        raise ValueError(
+            f"Config {config_name!r}: scoring=mlp_head requires "
+            f"chunk_repr=header_body (Aq(E(q))||Ac(E(h)|E(b)))"
+        )
+    cfg["scoring"] = scoring
+    cfg["head_hidden"] = max(1, int(cfg["head_hidden"]))
+    cfg["early_stop_patience"] = max(0, int(cfg["early_stop_patience"]))
+    cfg["early_stop_min_delta"] = float(cfg["early_stop_min_delta"])
     return cfg

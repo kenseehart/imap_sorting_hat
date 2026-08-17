@@ -59,6 +59,14 @@ def get_qdrant_client() -> QdrantClient:
     """Shared client. Fails fast if neither URL nor path works."""
     path = qdrant_path()
     url = qdrant_url()
+    # Explicit timeout: default httpx timeout is too short under VM memory pressure
+    # (we saw ResponseHandlingException: timed out on fish_legacy searches).
+    load_env()
+    timeout = float(os.getenv("FISH_QDRANT_TIMEOUT_SEC", "120").strip() or "60")
+    if timeout <= 0:
+        raise RuntimeError(
+            f"FISH_QDRANT_TIMEOUT_SEC must be positive, got {timeout!r}"
+        )
     if path:
         client = QdrantClient(path=path)
     elif url in (":memory:", "memory"):
@@ -74,6 +82,7 @@ def get_qdrant_client() -> QdrantClient:
             api_key=qdrant_api_key(),
             prefer_grpc=False,
             check_compatibility=False,
+            timeout=timeout,
         )
     # Probe connectivity
     client.get_collections()

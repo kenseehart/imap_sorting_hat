@@ -70,6 +70,7 @@ class ParsedMessage:
     body_for_embed: str
     content_hash: str
     gmail_labels: list[str] | None = None
+    gm_msgid: str | None = None
 
 
 def parse_raw_message(
@@ -179,6 +180,11 @@ def parse_fetched_message(raw: dict) -> ParsedMessage:
     labels = raw.get("gmail_labels")
     if labels:
         parsed.gmail_labels = labels
+    gm = raw.get("gm_msgid")
+    if gm is not None:
+        from fish.identity import normalize_gm_msgid
+
+        parsed.gm_msgid = normalize_gm_msgid(gm)
     return parsed
 
 

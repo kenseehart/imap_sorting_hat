@@ -7,9 +7,14 @@ from typing import Any
 from cmdline.progress import progress_bar
 
 from fish.prism.configs import LEGACY_MODEL_ID
-from fish.prism.inference import adapt_chunk_for_model, clear_model_cache
+from fish.prism.inference import (
+    adapt_chunk_for_model,
+    clear_model_cache,
+    compose_chunk_vector,
+    load_prism_model,
+)
 from fish.qdrant_store import all_point_ids, build_payload, upsert_points_batch
-from fish.store import blob_to_embedding, db_conn, init_db
+from fish.store import db_conn, init_db
 from fish.write_lock import fish_write_lock
 
 
@@ -50,6 +55,8 @@ def prism_reembed(
             if model is None:
                 raise KeyError(f"Unknown model_id {model_id!r}")
             collection = model["vec_table"]
+            prism = load_prism_model(model_id)
+            chunk_repr = prism.chunk_repr
 
             already: set[int] = set()
             if not force:
@@ -145,7 +152,7 @@ def prism_reembed(
 
                 placeholders = ",".join("?" for _ in to_load)
                 row_sql = f"""
-                    SELECT c.id, c.kind, c.source, c.occurred_at, c.payload, r.embedding
+                    SELECT c.id, c.kind, c.source, c.occurred_at, c.payload
                     FROM corpus_items c
                     JOIN corpus_raw_embeddings r ON r.item_id = c.id
                     WHERE c.id IN ({placeholders})
@@ -153,7 +160,7 @@ def prism_reembed(
                 """
                 batch: list[tuple[int, list[float], dict[str, Any]]] = []
                 for row in db.execute(row_sql, to_load).fetchall():
-                    raw = blob_to_embedding(row["embedding"])
+                    raw = compose_chunk_vector(db, int(row["id"]), chunk_repr)
                     if not raw:
                         bar.update(1)
                         continue
@@ -183,5 +190,6 @@ def prism_reembed(
         "like": like,
         "since": since,
         "force": force,
+        "chunk_repr": chunk_repr,
         "openai_calls": 0,
     }

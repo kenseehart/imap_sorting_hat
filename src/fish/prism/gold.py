@@ -1,4 +1,4 @@
-"""Curated gold training queries — load, insert, dump, replace."""
+"""Curated training queries — load JSONL (hand-authored seeds), dump, replace."""
 
 from __future__ import annotations
 
@@ -17,17 +17,21 @@ from fish.store import (
 )
 
 # Package seed + optional user override
-_PACKAGE_GOLD = Path(__file__).resolve().parents[3] / "config" / "gold_queries.jsonl"
-USER_GOLD = CONFIG_DIR / "gold_queries.jsonl"
+_PACKAGE_CURATED = Path(__file__).resolve().parents[3] / "config" / "gold_queries.jsonl"
+USER_CURATED = CONFIG_DIR / "gold_queries.jsonl"
+# Back-compat aliases
+_PACKAGE_GOLD = _PACKAGE_CURATED
+USER_GOLD = USER_CURATED
 
 DEFAULT_SOURCE = "curated:email-kb"
+CURATED_ORIGIN = "curated"
 
 
 def load_gold_file(path: Path | None = None) -> list[dict[str, Any]]:
-    """Load JSONL gold queries. Each line: {text, source?, meta?}."""
-    target = path or (_PACKAGE_GOLD if _PACKAGE_GOLD.is_file() else USER_GOLD)
+    """Load JSONL curated queries. Each line: {text, source?, meta?}."""
+    target = path or (_PACKAGE_CURATED if _PACKAGE_CURATED.is_file() else USER_CURATED)
     if not target.is_file():
-        raise FileNotFoundError(f"Gold query file not found: {target}")
+        raise FileNotFoundError(f"Curated query file not found: {target}")
     rows: list[dict[str, Any]] = []
     for i, line in enumerate(target.read_text(encoding="utf-8").splitlines(), start=1):
         line = line.strip()
@@ -48,26 +52,26 @@ def delete_gold_queries(
     *,
     source: str | None = None,
 ) -> dict[str, int]:
-    """Permanently delete gold queries (and their training_samples)."""
+    """Permanently delete curated queries (and their training_samples)."""
     if source:
         qids = [
             int(r[0])
             for r in db.execute(
-                "SELECT id FROM training_queries WHERE origin = 'gold' AND source = ?",
-                (source,),
+                "SELECT id FROM training_queries WHERE origin = ? AND source = ?",
+                (CURATED_ORIGIN, source),
             ).fetchall()
         ]
     else:
         qids = [
             int(r[0])
             for r in db.execute(
-                "SELECT id FROM training_queries WHERE origin = 'gold'"
+                "SELECT id FROM training_queries WHERE origin = ?",
+                (CURATED_ORIGIN,),
             ).fetchall()
         ]
     samples_deleted = 0
     if qids:
         placeholders = ",".join("?" for _ in qids)
-        # Break FK from synthetic children before deleting gold rows
         db.execute(
             f"UPDATE training_queries SET parent_query_id = NULL "
             f"WHERE parent_query_id IN ({placeholders})",
@@ -91,7 +95,7 @@ def add_gold_queries(
     embed: bool = True,
     default_source: str = DEFAULT_SOURCE,
 ) -> dict[str, Any]:
-    """Insert origin=gold queries. Skips duplicates. Optionally embeds in batches."""
+    """Insert origin=curated queries. Skips duplicates. Optionally embeds."""
     init_db()
     inserted: list[int] = []
     skipped = 0
@@ -110,7 +114,7 @@ def add_gold_queries(
             qid = insert_training_query(
                 db,
                 text=text,
-                origin="gold",
+                origin=CURATED_ORIGIN,
                 source=source,
                 meta_json=meta_json,
             )
@@ -136,6 +140,7 @@ def add_gold_queries(
         "skipped_duplicates": skipped,
         "embedded": embedded,
         "ids": inserted,
+        "origin": CURATED_ORIGIN,
     }
 
 
@@ -145,7 +150,7 @@ def replace_gold_queries(
     embed: bool = True,
     default_source: str = DEFAULT_SOURCE,
 ) -> dict[str, Any]:
-    """Delete all gold queries, then insert ``entries``."""
+    """Delete all curated queries, then insert ``entries``."""
     init_db()
     with db_conn() as db:
         deleted = delete_gold_queries(db)
@@ -157,7 +162,7 @@ def replace_gold_queries(
 
 def dump_queries(
     *,
-    origin: str | None = "gold",
+    origin: str | None = None,
     source: str | None = None,
     limit: int | None = None,
     include_embeddings: bool = False,

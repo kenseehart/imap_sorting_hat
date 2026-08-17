@@ -2,20 +2,94 @@
 # model_id = {config_name}.{UTC_timestamp}  →  models/{model_id}.prz
 #
 # Override or extend in ~/.config/fish/prism_models.yaml
+#
+# chunk_repr:
+#   combined     — E(h+b): OpenAI embed of combined text_for_embed
+#   header_body  — E(h)&E(b): concat(header_embedding, body_embedding) → A_c
+#
+# epochs = max epochs (ceiling). early_stop_patience > 0 → stop when holdout
+# Spearman fails to improve by early_stop_min_delta for that many epochs;
+# best holdout weights are kept. patience 0 → always run all epochs (smoke).
 
-personal:
-  epochs: 5
+# Overfit smokes: high epochs, no weight decay — train-set Spearman should soar if pipeline works.
+smoke_combined:
+  epochs: 80
+  early_stop_patience: 0
+  lr: 1.0e-3
+  batch_size: 64
+  weight_decay: 0.0
+  embed_dim: 1536
+  chunk_repr: combined
+  adapter_sharing: dual
+
+smoke_fields:
+  epochs: 80
+  early_stop_patience: 0
+  lr: 1.0e-3
+  batch_size: 64
+  weight_decay: 0.0
+  embed_dim: 1536
+  chunk_repr: header_body
+  adapter_sharing: dual
+
+# Personal: train until holdout Spearman stalls (patience), capped by epochs.
+personal_combined:
+  epochs: 200
+  early_stop_patience: 15
+  early_stop_min_delta: 0.001
   lr: 2.0e-5
   batch_size: 64
   weight_decay: 0.01
-  residual_alpha_init: 0.9
-  # Dual residual MLP adapters (whitepaper); embed_dim follows FISH_EMBEDDING_MODEL
   embed_dim: 1536
+  chunk_repr: combined
+  adapter_sharing: dual
 
-smoke:
-  epochs: 3
+personal_fields:
+  epochs: 200
+  early_stop_patience: 15
+  early_stop_min_delta: 0.001
   lr: 2.0e-5
   batch_size: 64
   weight_decay: 0.01
-  residual_alpha_init: 0.9
   embed_dim: 1536
+  chunk_repr: header_body
+  adapter_sharing: dual
+
+# Shared A for query and chunk (true siamese). combined only — header_body
+# needs asymmetric A_c (3072→1536).
+smoke_siamese:
+  epochs: 80
+  early_stop_patience: 0
+  lr: 1.0e-3
+  batch_size: 64
+  weight_decay: 0.0
+  embed_dim: 1536
+  chunk_repr: combined
+  adapter_sharing: siamese
+
+personal_siamese:
+  epochs: 200
+  early_stop_patience: 15
+  early_stop_min_delta: 0.001
+  lr: 2.0e-5
+  batch_size: 64
+  weight_decay: 0.01
+  embed_dim: 1536
+  chunk_repr: combined
+  adapter_sharing: siamese
+
+# Pair MLP on personal_fields-style adapters — no cosine.
+# score = σ(MLP(Aq(E(q)) ‖ Ac(E(h)|E(b)))). ANN still uses personal_fields;
+# this model reranks those candidates (NWRA / eval).
+personal_rerank:
+  epochs: 200
+  early_stop_patience: 15
+  early_stop_min_delta: 0.001
+  lr: 2.0e-5
+  batch_size: 64
+  weight_decay: 0.01
+  embed_dim: 1536
+  chunk_repr: header_body
+  adapter_sharing: dual
+  scoring: mlp_head
+  head_hidden: 512

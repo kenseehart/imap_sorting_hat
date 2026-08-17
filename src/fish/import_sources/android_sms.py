@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from fish.corpus import PHONE_FILTER_DEFAULT, normalize_phone, sms_corpus_item
+from fish.identity import sms_canonical_id
 from fish.store import db_conn, get_corpus_by_source_key, init_db, upsert_corpus_item
 
 
@@ -42,7 +43,12 @@ def import_android_sms(
             stats["matched"] += 1
             body = elem.get("body") or ""
             sms_id = elem.get("_id") or elem.get("id")
-            source_key = f"android_sms:{sms_id or hash((address, elem.get('date'), body))}"
+            source_key = sms_canonical_id(
+                sms_id=sms_id,
+                address=address,
+                date=elem.get("date"),
+                body=body,
+            )
             item = sms_corpus_item(
                 source_key=source_key,
                 phone=address,

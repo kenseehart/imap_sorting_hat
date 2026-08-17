@@ -10,7 +10,13 @@ from typing import Any, Iterator, Literal
 import numpy as np
 
 from fish.config import db_path, ensure_config_dir
-from fish.corpus import CorpusItem, corpus_row_to_dict, email_corpus_from_message
+from fish.corpus import (
+    EMAIL_CORPUS_MESSAGE_JOIN,
+    CorpusItem,
+    corpus_row_to_dict,
+    email_corpus_from_message,
+    parse_imap_source_key,
+)
 from fish.parse import ParsedMessage
 
 
@@ -118,6 +124,7 @@ CREATE TABLE IF NOT EXISTS corpus_items (
     source_key TEXT NOT NULL UNIQUE,
     text_for_embed TEXT NOT NULL,
     body_text TEXT,
+    header_json TEXT,
     occurred_at TEXT,
     ingested_at TEXT,
     embedded_at TEXT,
@@ -133,6 +140,8 @@ CREATE INDEX IF NOT EXISTS idx_corpus_source ON corpus_items(source);
 CREATE TABLE IF NOT EXISTS corpus_raw_embeddings (
     item_id INTEGER PRIMARY KEY,
     embedding BLOB NOT NULL,
+    header_embedding BLOB,
+    body_embedding BLOB,
     updated_at TEXT NOT NULL,
     FOREIGN KEY (item_id) REFERENCES corpus_items(id)
 );
@@ -227,16 +236,35 @@ def init_db() -> None:
         cols = {row[1] for row in db.execute("PRAGMA table_info(messages)")}
         if "gmail_labels" not in cols:
             db.execute("ALTER TABLE messages ADD COLUMN gmail_labels TEXT")
+        if "gm_msgid" not in cols:
+            db.execute("ALTER TABLE messages ADD COLUMN gm_msgid TEXT")
+        if "canonical_id" not in cols:
+            db.execute("ALTER TABLE messages ADD COLUMN canonical_id TEXT")
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_canonical_id ON messages(canonical_id)"
+        )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_gm_msgid ON messages(gm_msgid)"
+        )
         tq_cols = {row[1] for row in db.execute("PRAGMA table_info(training_queries)")}
         if "source" not in tq_cols:
             db.execute("ALTER TABLE training_queries ADD COLUMN source TEXT")
         if "meta_json" not in tq_cols:
             db.execute("ALTER TABLE training_queries ADD COLUMN meta_json TEXT")
+        ci_cols = {row[1] for row in db.execute("PRAGMA table_info(corpus_items)")}
+        if "header_json" not in ci_cols:
+            db.execute("ALTER TABLE corpus_items ADD COLUMN header_json TEXT")
+        raw_cols = {row[1] for row in db.execute("PRAGMA table_info(corpus_raw_embeddings)")}
+        if "header_embedding" not in raw_cols:
+            db.execute("ALTER TABLE corpus_raw_embeddings ADD COLUMN header_embedding BLOB")
+        if "body_embedding" not in raw_cols:
+            db.execute("ALTER TABLE corpus_raw_embeddings ADD COLUMN body_embedding BLOB")
         from fish.prism.registry import ensure_legacy_model, ensure_model_vec_tables
 
         ensure_legacy_model(db)
         ensure_model_vec_tables(db)
         _migrate_messages_to_corpus(db)
+        migrate_training_query_origins(db)
 
 
 def _migrate_messages_to_corpus(db: sqlite3.Connection) -> None:
@@ -303,11 +331,30 @@ def upsert_message(
     uid: int,
     parsed: ParsedMessage,
 ) -> tuple[int, bool]:
+    from fish.identity import email_canonical_id, normalize_gm_msgid
+
+    acct = db.execute(
+        "SELECT email FROM accounts WHERE id = ?", (account_id,)
+    ).fetchone()
+    account_email = acct["email"] if acct else None
+    if not account_email:
+        raise RuntimeError(f"No account email for account_id={account_id}")
+
+    gm_msgid = normalize_gm_msgid(getattr(parsed, "gm_msgid", None))
+    parsed.gm_msgid = gm_msgid
+    from_addr = parsed.from_addrs[0] if parsed.from_addrs else ""
+    canon, _synthetic = email_canonical_id(
+        account_email=account_email,
+        rfc_message_id=parsed.message_id,
+        gm_msgid=gm_msgid,
+        from_addr=from_addr,
+        date=parsed.date,
+        subject=parsed.subject or "",
+        body=parsed.body_text or "",
+    )
+
     existing = get_message_by_uid(db, account_id, folder, uid)
     if existing and existing["content_hash"] == parsed.content_hash:
-        acct = db.execute(
-            "SELECT email FROM accounts WHERE id = ?", (account_id,)
-        ).fetchone()
         _upsert_email_corpus(
             db,
             int(existing["id"]),
@@ -315,8 +362,10 @@ def upsert_message(
             folder,
             uid,
             parsed,
-            acct["email"] if acct else None,
+            account_email,
             embedded_at=existing.get("embedded_at"),
+            canonical_id=canon,
+            gm_msgid=gm_msgid,
         )
         return int(existing["id"]), False
 
@@ -325,8 +374,8 @@ def upsert_message(
         INSERT INTO messages (
             account_id, folder, uid, message_id, in_reply_to, subject, from_addr,
             to_addrs, cc_addrs, date, flags, body_text, body_for_embed, content_hash,
-            gmail_labels
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            gmail_labels, gm_msgid, canonical_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(account_id, folder, uid) DO UPDATE SET
             message_id=excluded.message_id,
             in_reply_to=excluded.in_reply_to,
@@ -340,6 +389,8 @@ def upsert_message(
             body_for_embed=excluded.body_for_embed,
             content_hash=excluded.content_hash,
             gmail_labels=excluded.gmail_labels,
+            gm_msgid=excluded.gm_msgid,
+            canonical_id=excluded.canonical_id,
             embedded_at=NULL
         """,
         (
@@ -349,7 +400,7 @@ def upsert_message(
             parsed.message_id,
             parsed.in_reply_to,
             parsed.subject,
-            parsed.from_addrs[0] if parsed.from_addrs else "",
+            from_addr,
             json.dumps(parsed.to_addrs),
             json.dumps(parsed.cc_addrs),
             parsed.date,
@@ -358,13 +409,23 @@ def upsert_message(
             parsed.body_for_embed,
             parsed.content_hash,
             json.dumps(parsed.gmail_labels) if parsed.gmail_labels else None,
+            gm_msgid,
+            canon,
         ),
     )
     row = get_message_by_uid(db, account_id, folder, uid)
     msg_id = int(row["id"])
-    acct = db.execute("SELECT email FROM accounts WHERE id = ?", (account_id,)).fetchone()
-    account_email = acct["email"] if acct else None
-    _upsert_email_corpus(db, msg_id, account_id, folder, uid, parsed, account_email)
+    _upsert_email_corpus(
+        db,
+        msg_id,
+        account_id,
+        folder,
+        uid,
+        parsed,
+        account_email,
+        canonical_id=canon,
+        gm_msgid=gm_msgid,
+    )
     return msg_id, True
 
 
@@ -384,6 +445,7 @@ def _upsert_email_corpus_from_row(db: sqlite3.Connection, row: dict[str, Any]) -
         body_for_embed=row.get("body_for_embed") or "",
         content_hash=row.get("content_hash") or "",
         gmail_labels=json.loads(row["gmail_labels"]) if row.get("gmail_labels") else None,
+        gm_msgid=row.get("gm_msgid"),
     )
     acct = db.execute(
         "SELECT email FROM accounts WHERE id = ?", (row["account_id"],)
@@ -397,12 +459,15 @@ def _upsert_email_corpus_from_row(db: sqlite3.Connection, row: dict[str, Any]) -
         parsed,
         acct["email"] if acct else None,
         embedded_at=row.get("embedded_at"),
+        canonical_id=row.get("canonical_id"),
+        gm_msgid=row.get("gm_msgid"),
+        allow_gmail_rfc_fallback=True,
     )
 
 
 def _upsert_email_corpus(
     db: sqlite3.Connection,
-    message_id: int,
+    message_pk: int,
     account_id: int,
     folder: str,
     uid: int,
@@ -410,18 +475,44 @@ def _upsert_email_corpus(
     account_email: str | None,
     *,
     embedded_at: str | None = None,
+    canonical_id: str | None = None,
+    gm_msgid: str | None = None,
+    allow_gmail_rfc_fallback: bool = False,
 ) -> int:
+    if gm_msgid and not getattr(parsed, "gm_msgid", None):
+        parsed.gm_msgid = gm_msgid
     item = email_corpus_from_message(
-        message_id, account_id, folder, uid, parsed, account_email
+        message_pk,
+        account_id,
+        folder,
+        uid,
+        parsed,
+        account_email,
+        allow_gmail_rfc_fallback=allow_gmail_rfc_fallback,
     )
+    if canonical_id:
+        item.source_key = canonical_id
+        item.payload["canonical_id"] = canonical_id
     existing = get_corpus_by_source_key(db, item.source_key)
     preserve_embedded = embedded_at
-    if existing and existing.get("embedded_at") and parsed.content_hash == existing.get("content_hash"):
+    if existing and existing.get("embedded_at") and parsed.content_hash == existing.get(
+        "content_hash"
+    ):
         preserve_embedded = existing["embedded_at"]
-    elif existing and existing.get("embedded_at") and parsed.content_hash != existing.get("content_hash"):
+    elif (
+        existing
+        and existing.get("embedded_at")
+        and parsed.content_hash != existing.get("content_hash")
+    ):
         preserve_embedded = None
-        unindex_corpus_item(db, message_id)
-    return upsert_corpus_item(db, item, item_id=message_id, embedded_at=preserve_embedded)
+        unindex_corpus_item(db, int(existing["id"]))
+    # Never pass messages.id as preferred corpus PK (cross-source collisions).
+    corpus_id = upsert_corpus_item(db, item, item_id=None, embedded_at=preserve_embedded)
+    db.execute(
+        "UPDATE messages SET canonical_id = ?, gm_msgid = COALESCE(?, gm_msgid) WHERE id = ?",
+        (item.source_key, gm_msgid or getattr(parsed, "gm_msgid", None), message_pk),
+    )
+    return corpus_id
 
 
 def upsert_corpus_item(
@@ -442,6 +533,7 @@ def upsert_corpus_item(
                 source=?,
                 text_for_embed=?,
                 body_text=?,
+                header_json=?,
                 occurred_at=?,
                 content_hash=?,
                 payload=?,
@@ -457,6 +549,7 @@ def upsert_corpus_item(
                 item.source,
                 item.text_for_embed,
                 item.body_text,
+                item.header_json,
                 item.occurred_at,
                 item.content_hash_value,
                 json.dumps(item.payload),
@@ -481,9 +574,9 @@ def upsert_corpus_item(
         db.execute(
             """
             INSERT INTO corpus_items (
-                id, kind, source, source_key, text_for_embed, body_text,
+                id, kind, source, source_key, text_for_embed, body_text, header_json,
                 occurred_at, ingested_at, embedded_at, content_hash, payload, tags
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 use_id,
@@ -492,6 +585,7 @@ def upsert_corpus_item(
                 item.source_key,
                 item.text_for_embed,
                 item.body_text,
+                item.header_json,
                 item.occurred_at,
                 now,
                 embedded,
@@ -505,9 +599,9 @@ def upsert_corpus_item(
     db.execute(
         """
         INSERT INTO corpus_items (
-            kind, source, source_key, text_for_embed, body_text,
+            kind, source, source_key, text_for_embed, body_text, header_json,
             occurred_at, ingested_at, embedded_at, content_hash, payload, tags
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             item.kind,
@@ -515,6 +609,7 @@ def upsert_corpus_item(
             item.source_key,
             item.text_for_embed,
             item.body_text,
+            item.header_json,
             item.occurred_at,
             now,
             embedded,
@@ -577,7 +672,7 @@ def get_embedding(db: sqlite3.Connection, item_id: int) -> list[float] | None:
 
 
 def get_raw_embedding(db: sqlite3.Connection, item_id: int) -> list[float] | None:
-    """Frozen OpenAI embedding c from SQLite (sole durable copy of raw vectors)."""
+    """Frozen OpenAI combined embedding c from SQLite (durable; not Qdrant-only)."""
     row = db.execute(
         "SELECT embedding FROM corpus_raw_embeddings WHERE item_id = ?",
         (item_id,),
@@ -585,6 +680,409 @@ def get_raw_embedding(db: sqlite3.Connection, item_id: int) -> list[float] | Non
     if not row:
         return None
     return blob_to_embedding(row["embedding"])
+
+
+def get_raw_field_embeddings(
+    db: sqlite3.Connection, item_id: int
+) -> dict[str, list[float] | None]:
+    """Return durable raw vectors: combined, header, body (SQLite only for fields)."""
+    row = db.execute(
+        """
+        SELECT embedding, header_embedding, body_embedding
+        FROM corpus_raw_embeddings WHERE item_id = ?
+        """,
+        (item_id,),
+    ).fetchone()
+    if not row:
+        return {"combined": None, "header": None, "body": None}
+    return {
+        "combined": blob_to_embedding(row["embedding"]),
+        "header": blob_to_embedding(row["header_embedding"]),
+        "body": blob_to_embedding(row["body_embedding"]),
+    }
+
+
+def set_raw_field_embeddings(
+    db: sqlite3.Connection,
+    item_id: int,
+    *,
+    header_embedding: list[float] | None = None,
+    body_embedding: list[float] | None = None,
+) -> None:
+    """Write header/body raw vectors to SQLite only (no Qdrant upsert)."""
+    if header_embedding is None and body_embedding is None:
+        return
+    combined = get_raw_embedding(db, item_id)
+    if combined is None:
+        raise ValueError(f"corpus item {item_id} has no combined embedding")
+    _store_raw_embedding(
+        db,
+        item_id,
+        combined,
+        header_embedding=header_embedding,
+        body_embedding=body_embedding,
+    )
+
+
+def _header_json_from_message_row(row: sqlite3.Row | dict[str, Any]) -> str:
+    header_obj = {
+        "subject": row["subject"] or "",
+        "from": [row["from_addr"]] if row["from_addr"] else [],
+        "to": json.loads(row["to_addrs"] or "[]"),
+        "cc": json.loads(row["cc_addrs"] or "[]"),
+        "message_id": row["message_id"] or "",
+        "in_reply_to": row["in_reply_to"] or "",
+        "date": row["date"],
+        "account_email": row["account_email"],
+        "folder": row["folder"],
+    }
+    return json.dumps(header_obj, sort_keys=True, ensure_ascii=False)
+
+
+def _header_json_from_non_email_payload(kind: str, payload: dict[str, Any]) -> str | None:
+    header_obj: dict[str, Any] = {"kind": kind}
+    for key in (
+        "phone",
+        "direction",
+        "contact_name",
+        "sms_id",
+        "title",
+        "role",
+        "conversation_id",
+        "memory_key",
+        "source",
+    ):
+        if key in payload and payload[key] is not None:
+            header_obj[key] = payload[key]
+    if len(header_obj) <= 1:
+        return None
+    return json.dumps(header_obj, sort_keys=True, ensure_ascii=False)
+
+
+def backfill_corpus_header_json(
+    db: sqlite3.Connection, *, training_only: bool = False
+) -> int:
+    """Fill missing corpus_items.header_json from messages / payload (no OpenAI).
+
+    Email rows are resolved via ``source_key`` → messages (account/folder/uid),
+    never ``m.id = c.id`` (id skew poisons neighbor headers).
+
+    ``training_only=True`` limits to labeled training_samples (smoke / train prep).
+    """
+    return repair_corpus_header_json(
+        db, training_only=training_only, missing_only=True
+    )["updated"]
+
+
+def repair_corpus_header_json(
+    db: sqlite3.Connection,
+    *,
+    training_only: bool = False,
+    missing_only: bool = False,
+    dry_run: bool = False,
+    min_corpus_id: int | None = None,
+) -> dict[str, int]:
+    """Rebuild corpus_items.header_json from the correctly resolved message.
+
+    Resolves email via payload IMAP locator (or legacy ``imap:`` source_key) +
+    indexed ``messages(account_id, folder, uid)`` — never ``m.id = c.id``.
+
+    Scans email corpus rows (default ``id >= 110920``, the known SMS collision)
+    rather than a full expression-join over messages (too slow on cloud DBs).
+
+    Clears ``header_embedding`` for rewritten rows (``fish embed --fields``).
+    """
+    from fish.corpus import email_locator_from_payload
+
+    train_ids: set[int] | None = None
+    if training_only:
+        train_ids = {
+            int(r[0])
+            for r in db.execute(
+                """
+                SELECT DISTINCT corpus_item_id FROM training_samples
+                WHERE superseded_at IS NULL AND target_relevance IS NOT NULL
+                """
+            ).fetchall()
+        }
+
+    account_email = {
+        int(r["id"]): r["email"]
+        for r in db.execute("SELECT id, email FROM accounts").fetchall()
+    }
+    msg_stmt = """
+        SELECT id, subject, from_addr, to_addrs, cc_addrs, message_id, in_reply_to,
+               date, folder, account_id
+        FROM messages
+        WHERE account_id = ? AND folder = ? AND uid = ?
+    """
+
+    # Default: only rows at/after the known SMS PK collision (test:sms:1 @ 110920).
+    if min_corpus_id is None and not missing_only and not training_only:
+        min_corpus_id = 110920
+
+    clauses = ["c.kind = 'email'"]
+    params: list[Any] = []
+    if missing_only:
+        clauses.append("(c.header_json IS NULL OR c.header_json = '')")
+    if min_corpus_id is not None:
+        clauses.append("c.id >= ?")
+        params.append(min_corpus_id)
+
+    updated = 0
+    header_embeds_cleared = 0
+    unmatched_email = 0
+    changed_ids: list[int] = []
+
+    email_rows = db.execute(
+        f"""
+        SELECT c.id, c.source_key, c.header_json, c.payload
+        FROM corpus_items c
+        WHERE {' AND '.join(clauses)}
+        ORDER BY c.id
+        """,
+        params,
+    )
+    for crow in email_rows:
+        cid = int(crow["id"])
+        if train_ids is not None and cid not in train_ids:
+            continue
+        locator = email_locator_from_payload(crow["payload"])
+        if locator is None:
+            locator = parse_imap_source_key(crow["source_key"] or "")
+        if locator is None:
+            unmatched_email += 1
+            continue
+        account_id, folder, uid = locator
+        m = db.execute(msg_stmt, (account_id, folder, uid)).fetchone()
+        if m is None:
+            unmatched_email += 1
+            continue
+        msg = {
+            "subject": m["subject"],
+            "from_addr": m["from_addr"],
+            "to_addrs": m["to_addrs"],
+            "cc_addrs": m["cc_addrs"],
+            "message_id": m["message_id"],
+            "in_reply_to": m["in_reply_to"],
+            "date": m["date"],
+            "folder": m["folder"],
+            "account_email": account_email.get(int(m["account_id"])),
+        }
+        new_header = _header_json_from_message_row(msg)
+        old_header = crow["header_json"] or ""
+        if old_header == new_header:
+            continue
+        if not missing_only and old_header:
+            try:
+                old = json.loads(old_header)
+            except json.JSONDecodeError:
+                old = {}
+            if (
+                (old.get("subject") or "") == (msg["subject"] or "")
+                and (old.get("message_id") or "") == (msg["message_id"] or "")
+                and (old.get("folder") or "") == (msg["folder"] or "")
+            ):
+                continue
+        changed_ids.append(cid)
+        if not dry_run:
+            db.execute(
+                "UPDATE corpus_items SET header_json = ? WHERE id = ?",
+                (new_header, cid),
+            )
+            if len(changed_ids) % 500 == 0:
+                db.commit()
+                print(f"repair progress updated={len(changed_ids)}", flush=True)
+        updated += 1
+
+    if changed_ids and not dry_run:
+        now = _utcnow()
+        chunk = 500
+        for i in range(0, len(changed_ids), chunk):
+            batch = changed_ids[i : i + chunk]
+            placeholders = ",".join("?" * len(batch))
+            cur = db.execute(
+                f"""
+                UPDATE corpus_raw_embeddings
+                SET header_embedding = NULL, updated_at = ?
+                WHERE item_id IN ({placeholders}) AND header_embedding IS NOT NULL
+                """,
+                [now, *batch],
+            )
+            header_embeds_cleared += cur.rowcount
+
+    other_updated = 0
+    other = db.execute(
+        """
+        SELECT c.id, c.kind, c.payload, c.header_json FROM corpus_items c
+        WHERE c.kind != 'email'
+          AND (c.header_json IS NULL OR c.header_json = '')
+          AND c.payload IS NOT NULL AND c.payload != ''
+        """
+    ).fetchall()
+    for row in other:
+        if train_ids is not None and int(row["id"]) not in train_ids:
+            continue
+        try:
+            payload = json.loads(row["payload"] or "{}")
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or not payload:
+            continue
+        new_header = _header_json_from_non_email_payload(row["kind"], payload)
+        if new_header is None:
+            continue
+        old_header = row["header_json"] or ""
+        if old_header == new_header:
+            continue
+        if not dry_run:
+            db.execute(
+                "UPDATE corpus_items SET header_json = ? WHERE id = ?",
+                (new_header, row["id"]),
+            )
+            cur = db.execute(
+                """
+                UPDATE corpus_raw_embeddings
+                SET header_embedding = NULL, updated_at = ?
+                WHERE item_id = ? AND header_embedding IS NOT NULL
+                """,
+                (_utcnow(), row["id"]),
+            )
+            header_embeds_cleared += cur.rowcount
+        other_updated += 1
+        updated += 1
+
+    return {
+        "updated": updated,
+        "email_updated": updated - other_updated,
+        "other_updated": other_updated,
+        "header_embeds_cleared": header_embeds_cleared,
+        "unmatched_email": unmatched_email,
+        "dry_run": int(dry_run),
+        "min_corpus_id": int(min_corpus_id or 0),
+    }
+
+
+
+def neutralize_test_sms_collision(
+    db: sqlite3.Connection,
+    *,
+    source_key: str = "test:sms:1",
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Remove a synthetic SMS row that occupied a messages-range integer id.
+
+    Historically email upsert preferred ``corpus_items.id = messages.id``; a
+    non-email row at that id forced skewed ids. Current ingest never prefers
+    that mapping; this helper still cleans leftover collision rows.
+    Deletes embeddings, Qdrant points, training samples, then the corpus row.
+    Does not touch ``messages`` (ids may collide but are unrelated rows).
+    """
+    row = get_corpus_by_source_key(db, source_key)
+    if row is None:
+        return {
+            "deleted": False,
+            "source_key": source_key,
+            "reason": "not_found",
+        }
+    item_id = int(row["id"])
+    msg_collision = db.execute(
+        "SELECT 1 FROM messages WHERE id = ?", (item_id,)
+    ).fetchone()
+    sample_n = int(
+        db.execute(
+            "SELECT COUNT(*) FROM training_samples WHERE corpus_item_id = ?",
+            (item_id,),
+        ).fetchone()[0]
+    )
+    if dry_run:
+        return {
+            "deleted": False,
+            "dry_run": True,
+            "source_key": source_key,
+            "id": item_id,
+            "kind": row.get("kind"),
+            "collided_with_message": msg_collision is not None,
+            "training_samples": sample_n,
+        }
+
+    from fish.prism.registry import list_retrieval_models
+    from fish.qdrant_store import delete_point
+
+    db.execute("DELETE FROM corpus_raw_embeddings WHERE item_id = ?", (item_id,))
+    qdrant_errors: list[str] = []
+    for model in list_retrieval_models(db):
+        try:
+            delete_point(model["vec_table"], item_id)
+        except Exception as exc:  # pragma: no cover - best-effort ANN cleanup
+            qdrant_errors.append(f"{model['vec_table']}: {exc}")
+    db.execute("DELETE FROM training_samples WHERE corpus_item_id = ?", (item_id,))
+    db.execute("DELETE FROM corpus_items WHERE id = ?", (item_id,))
+    return {
+        "deleted": True,
+        "source_key": source_key,
+        "id": item_id,
+        "kind": row.get("kind"),
+        "collided_with_message": msg_collision is not None,
+        "qdrant_errors": qdrant_errors,
+        "training_samples_removed": sample_n,
+    }
+
+
+def corpus_needing_field_embeddings(
+    db: sqlite3.Connection,
+    limit: int = 100,
+    *,
+    training_only: bool = False,
+) -> list[dict[str, Any]]:
+    """Items with combined raw embed but missing header and/or body field embeds."""
+    train_join = ""
+    if training_only:
+        train_join = """
+        JOIN (
+            SELECT DISTINCT corpus_item_id AS id
+            FROM training_samples
+            WHERE superseded_at IS NULL AND target_relevance IS NOT NULL
+        ) t ON t.id = c.id
+        """
+    rows = db.execute(
+        f"""
+        SELECT c.id, c.text_for_embed, c.body_text, c.header_json,
+               r.header_embedding, r.body_embedding
+        FROM corpus_items c
+        JOIN corpus_raw_embeddings r ON r.item_id = c.id
+        {train_join}
+        WHERE r.header_embedding IS NULL OR r.body_embedding IS NULL
+        ORDER BY c.id
+        LIMIT ?
+        """,
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_corpus_needing_field_embeddings(
+    db: sqlite3.Connection, *, training_only: bool = False
+) -> int:
+    if training_only:
+        row = db.execute(
+            """
+            SELECT COUNT(DISTINCT s.corpus_item_id)
+            FROM training_samples s
+            JOIN corpus_raw_embeddings r ON r.item_id = s.corpus_item_id
+            WHERE s.superseded_at IS NULL
+              AND s.target_relevance IS NOT NULL
+              AND (r.header_embedding IS NULL OR r.body_embedding IS NULL)
+            """
+        ).fetchone()
+    else:
+        row = db.execute(
+            """
+            SELECT COUNT(*) FROM corpus_raw_embeddings
+            WHERE header_embedding IS NULL OR body_embedding IS NULL
+            """
+        ).fetchone()
+    return int(row[0])
 
 
 def get_model_embedding(
@@ -604,17 +1102,38 @@ def set_embedding(db: sqlite3.Connection, message_id: int, embedding: list[float
 
 
 def _store_raw_embedding(
-    db: sqlite3.Connection, item_id: int, embedding: list[float]
+    db: sqlite3.Connection,
+    item_id: int,
+    embedding: list[float],
+    *,
+    header_embedding: list[float] | None = None,
+    body_embedding: list[float] | None = None,
 ) -> None:
+    """Persist durable OpenAI raw vectors in SQLite (never Qdrant-only).
+
+    ``embedding`` is the combined text_for_embed vector (also copied to Qdrant
+    fish_legacy). ``header_embedding`` / ``body_embedding`` are field vectors
+    for PRISM composition; they stay in SQLite only.
+    """
     db.execute(
         """
-        INSERT INTO corpus_raw_embeddings (item_id, embedding, updated_at)
-        VALUES (?, ?, ?)
+        INSERT INTO corpus_raw_embeddings (
+            item_id, embedding, header_embedding, body_embedding, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(item_id) DO UPDATE SET
             embedding = excluded.embedding,
+            header_embedding = COALESCE(excluded.header_embedding, corpus_raw_embeddings.header_embedding),
+            body_embedding = COALESCE(excluded.body_embedding, corpus_raw_embeddings.body_embedding),
             updated_at = excluded.updated_at
         """,
-        (item_id, embedding_to_blob(embedding), _utcnow()),
+        (
+            item_id,
+            embedding_to_blob(embedding),
+            embedding_to_blob(header_embedding) if header_embedding is not None else None,
+            embedding_to_blob(body_embedding) if body_embedding is not None else None,
+            _utcnow(),
+        ),
     )
 
 
@@ -632,18 +1151,30 @@ def set_corpus_embedding(
     item_id: int,
     embedding: list[float],
     *,
+    header_embedding: list[float] | None = None,
+    body_embedding: list[float] | None = None,
     model_embeddings: dict[str, list[float]] | None = None,
 ) -> None:
-    """Persist raw c in SQLite; upsert Qdrant points for legacy + PRISM models.
+    """Persist raw vectors in SQLite; upsert combined vector to Qdrant ANN.
 
-    ``embedding`` is always the frozen OpenAI raw c.
+    Durable store (SQLite ``corpus_raw_embeddings``):
+      - ``embedding`` — combined ``text_for_embed`` (also → fish_legacy)
+      - ``header_embedding`` / ``body_embedding`` — field vectors for PRISM
+        composition; **not** written to Qdrant
+
     ``model_embeddings`` maps model_id → Ac(c) for registered PRISM indexes.
     """
     from fish.prism.configs import LEGACY_MODEL_ID
     from fish.prism.registry import get_retrieval_model, list_retrieval_models
     from fish.qdrant_store import upsert_point
 
-    _store_raw_embedding(db, item_id, embedding)
+    _store_raw_embedding(
+        db,
+        item_id,
+        embedding,
+        header_embedding=header_embedding,
+        body_embedding=body_embedding,
+    )
     payload = _payload_for_item(db, item_id)
     legacy = get_retrieval_model(db, LEGACY_MODEL_ID)
     if legacy is None:
@@ -698,10 +1229,14 @@ def set_model_embedding(
 
 def unindex_corpus_item(db: sqlite3.Connection, item_id: int) -> int:
     """Remove item from SQLite raw store and every Qdrant collection."""
+    from fish.corpus import email_locator_from_payload, parse_imap_source_key
     from fish.prism.registry import list_retrieval_models
     from fish.qdrant_store import delete_point
 
     n = 0
+    row = db.execute(
+        "SELECT kind, source_key, payload FROM corpus_items WHERE id = ?", (item_id,)
+    ).fetchone()
     db.execute("DELETE FROM corpus_raw_embeddings WHERE item_id = ?", (item_id,))
     for model in list_retrieval_models(db):
         delete_point(model["vec_table"], item_id)
@@ -709,9 +1244,21 @@ def unindex_corpus_item(db: sqlite3.Connection, item_id: int) -> int:
     db.execute(
         "UPDATE corpus_items SET embedded_at = NULL WHERE id = ?", (item_id,)
     )
-    db.execute(
-        "UPDATE messages SET embedded_at = NULL WHERE id = ?", (item_id,)
-    )
+    # Clear matching message via payload locator or legacy imap source_key —
+    # never assume messages.id = corpus.id.
+    if row and row["kind"] == "email":
+        locator = email_locator_from_payload(row["payload"])
+        if locator is None:
+            locator = parse_imap_source_key(row["source_key"] or "")
+        if locator is not None:
+            account_id, folder, uid = locator
+            db.execute(
+                """
+                UPDATE messages SET embedded_at = NULL
+                WHERE account_id = ? AND folder = ? AND uid = ?
+                """,
+                (account_id, folder, uid),
+            )
     return n
 
 
@@ -852,7 +1399,7 @@ def corpus_needing_embedding(
     since: str | None = None,
 ) -> list[dict[str, Any]]:
     sql = """
-        SELECT id, text_for_embed FROM corpus_items
+        SELECT id, text_for_embed, body_text, header_json FROM corpus_items
         WHERE id NOT IN (SELECT item_id FROM corpus_raw_embeddings)
     """
     params: list[Any] = []
@@ -943,9 +1490,9 @@ def corpus_keyword_search(
     kinds: list[str] | None = None,
 ) -> list[int]:
     pattern = f"%{query}%"
-    sql = """
+    sql = f"""
         SELECT c.id FROM corpus_items c
-        LEFT JOIN messages m ON m.id = c.id AND c.kind = 'email'
+        LEFT JOIN messages m ON {EMAIL_CORPUS_MESSAGE_JOIN} AND c.kind = 'email'
         LEFT JOIN accounts a ON a.id = m.account_id
         WHERE (
             c.text_for_embed LIKE ? OR c.body_text LIKE ?
@@ -1044,10 +1591,28 @@ def update_message_flags(db: sqlite3.Connection, message_id: int, flags: list[st
 
 
 def delete_message(db: sqlite3.Connection, message_id: int) -> None:
-    mark_samples_superseded_for_corpus(db, message_id)
-    table = _vec_table(db)
-    db.execute(f"DELETE FROM {table} WHERE rowid = ?", (message_id,))
-    db.execute("DELETE FROM corpus_items WHERE id = ?", (message_id,))
+    """Delete a messages row and its corpus item (via canonical_id / locator)."""
+    row = get_message_by_id(db, message_id)
+    corpus_id: int | None = None
+    if row:
+        cid = row.get("canonical_id")
+        if cid:
+            c = get_corpus_by_source_key(db, cid)
+            if c:
+                corpus_id = int(c["id"])
+        if corpus_id is None:
+            from fish.corpus import imap_source_key
+
+            legacy = get_corpus_by_source_key(
+                db,
+                imap_source_key(int(row["account_id"]), row["folder"], int(row["uid"])),
+            )
+            if legacy:
+                corpus_id = int(legacy["id"])
+    if corpus_id is not None:
+        mark_samples_superseded_for_corpus(db, corpus_id)
+        unindex_corpus_item(db, corpus_id)
+        db.execute("DELETE FROM corpus_items WHERE id = ?", (corpus_id,))
     db.execute("DELETE FROM messages WHERE id = ?", (message_id,))
 
 
@@ -1122,7 +1687,98 @@ def get_draft(db: sqlite3.Connection, draft_id: int) -> dict[str, Any] | None:
     return dict(row) if row else None
 
 
-QueryOrigin = Literal["real", "synthetic", "gold"]
+QueryOrigin = Literal["gold", "curated", "synth"]
+
+# Applied only while legacy labels (real/synthetic) still exist.
+_QUERY_ORIGIN_RENAMES: tuple[tuple[str, str], ...] = (
+    ("gold", "curated"),  # old JSONL seeds were mislabeled "gold"
+    ("real", "gold"),  # logged searches
+    ("synthetic", "synth"),
+)
+
+
+def migrate_training_query_origins(db: sqlite3.Connection) -> dict[str, int]:
+    """Rename origin values to gold / curated / synth. Idempotent.
+
+    Runs the legacy rename only when ``real``/``synthetic`` rows still exist.
+    Otherwise repairs logged rows wrongly folded into ``curated`` (source not
+    ``curated:*``).
+    """
+    legacy = db.execute(
+        "SELECT 1 FROM training_queries WHERE origin IN ('real', 'synthetic') LIMIT 1"
+    ).fetchone()
+    if not legacy:
+        repaired = db.execute(
+            """
+            UPDATE training_queries
+            SET origin = 'gold',
+                source = COALESCE(NULLIF(source, ''), 'logged')
+            WHERE origin = 'curated'
+              AND (
+                source IS NULL
+                OR source = ''
+                OR source = 'logged'
+                OR source NOT LIKE 'curated:%'
+              )
+            """
+        )
+        return {"repaired_logged_from_curated": int(repaired.rowcount)}
+
+    updated: dict[str, int] = {}
+    for old, new in _QUERY_ORIGIN_RENAMES:
+        n_old = db.execute(
+            "SELECT COUNT(*) FROM training_queries WHERE origin = ?", (old,)
+        ).fetchone()[0]
+        if not n_old:
+            updated[f"{old}->{new}"] = 0
+            continue
+        cur = db.execute(
+            """
+            UPDATE training_queries
+            SET origin = ?
+            WHERE origin = ?
+              AND text_hash NOT IN (
+                SELECT text_hash FROM training_queries WHERE origin = ?
+              )
+            """,
+            (new, old, new),
+        )
+        moved = int(cur.rowcount)
+        leftover = [
+            int(r[0])
+            for r in db.execute(
+                "SELECT id FROM training_queries WHERE origin = ?", (old,)
+            ).fetchall()
+        ]
+        dropped = 0
+        if leftover:
+            ph = ",".join("?" for _ in leftover)
+            db.execute(
+                f"UPDATE training_queries SET parent_query_id = NULL "
+                f"WHERE parent_query_id IN ({ph})",
+                leftover,
+            )
+            for qid in leftover:
+                row = db.execute(
+                    "SELECT text_hash FROM training_queries WHERE id = ?", (qid,)
+                ).fetchone()
+                if not row:
+                    continue
+                survivor = db.execute(
+                    "SELECT id FROM training_queries WHERE text_hash = ? AND origin = ?",
+                    (row[0], new),
+                ).fetchone()
+                if survivor:
+                    db.execute(
+                        "UPDATE training_samples SET query_id = ? WHERE query_id = ?",
+                        (int(survivor[0]), qid),
+                    )
+                db.execute("DELETE FROM training_samples WHERE query_id = ?", (qid,))
+                db.execute("DELETE FROM training_queries WHERE id = ?", (qid,))
+                dropped += 1
+        updated[f"{old}->{new}"] = moved
+        updated[f"{old}->dropped_dup"] = dropped
+    return updated
 
 
 def normalize_query_text(text: str) -> str:
@@ -1133,8 +1789,13 @@ def query_text_hash(text: str) -> str:
     return hashlib.sha256(normalize_query_text(text).encode()).hexdigest()
 
 
-def sample_pair_hash(query_id: int, corpus_item_id: int, retriever: str) -> str:
-    payload = f"{query_id}\0{corpus_item_id}\0{retriever}"
+def sample_pair_hash(query_id: int, corpus_item_id: int) -> str:
+    """Stable identity for a training pair: (query, corpus item).
+
+    Retriever is provenance/metadata only — cycling retrievers must not mint
+    duplicate rows or invalidate existing RA labels.
+    """
+    payload = f"{query_id}\0{corpus_item_id}"
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -1209,7 +1870,7 @@ def get_training_query_by_text(
     db: sqlite3.Connection,
     text: str,
     *,
-    origin: QueryOrigin | None = "real",
+    origin: QueryOrigin | None = "gold",
 ) -> dict[str, Any] | None:
     thash = query_text_hash(text)
     if origin is None:
@@ -1310,6 +1971,20 @@ def update_training_query_embedding(
     )
 
 
+def get_active_training_sample_for_pair(
+    db: sqlite3.Connection, query_id: int, corpus_item_id: int
+) -> dict[str, Any] | None:
+    row = db.execute(
+        """
+        SELECT * FROM training_samples
+        WHERE query_id = ? AND corpus_item_id = ? AND superseded_at IS NULL
+        ORDER BY id DESC LIMIT 1
+        """,
+        (query_id, corpus_item_id),
+    ).fetchone()
+    return training_sample_row_to_dict(row) if row else None
+
+
 def insert_training_sample(
     db: sqlite3.Connection,
     *,
@@ -1325,9 +2000,33 @@ def insert_training_sample(
     query_embedding: list[float],
     message_embedding: list[float],
 ) -> int | None:
-    """Insert sample. Returns id, or None if pair_hash duplicate."""
+    """Insert sample. Returns id, or None if (query, item) already exists.
+
+    On duplicate: refresh retrieval provenance only — never clear RA labels.
+    """
+    existing = get_active_training_sample_for_pair(db, query_id, corpus_item_id)
+    if existing is not None:
+        db.execute(
+            """
+            UPDATE training_samples
+            SET retriever = ?, retrieval_similarity = ?, retrieval_rank = ?,
+                query_embedding = COALESCE(?, query_embedding),
+                message_embedding = COALESCE(?, message_embedding)
+            WHERE id = ?
+            """,
+            (
+                retriever,
+                retrieval_similarity,
+                retrieval_rank,
+                embedding_to_blob(query_embedding),
+                embedding_to_blob(message_embedding),
+                int(existing["id"]),
+            ),
+        )
+        return None
+
     now = _utcnow()
-    phash = sample_pair_hash(query_id, corpus_item_id, retriever)
+    phash = sample_pair_hash(query_id, corpus_item_id)
     try:
         cur = db.execute(
             """
@@ -1355,7 +2054,129 @@ def insert_training_sample(
         )
         return int(cur.lastrowid)
     except sqlite3.IntegrityError:
+        existing = get_active_training_sample_for_pair(db, query_id, corpus_item_id)
+        if existing is not None:
+            db.execute(
+                """
+                UPDATE training_samples
+                SET retriever = ?, retrieval_similarity = ?, retrieval_rank = ?
+                WHERE id = ?
+                """,
+                (retriever, retrieval_similarity, retrieval_rank, int(existing["id"])),
+            )
         return None
+
+
+def backfill_null_relevance_agent_versions(db: sqlite3.Connection) -> int:
+    """Labeled rows with null agent version were pre-versioning → treat as 1.0.0."""
+    cur = db.execute(
+        """
+        UPDATE training_samples
+        SET relevance_agent_version = '1.0.0'
+        WHERE superseded_at IS NULL
+          AND target_relevance IS NOT NULL
+          AND relevance_agent_version IS NULL
+        """
+    )
+    return int(cur.rowcount)
+
+
+def _training_sample_keep_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    """Higher is better: labeled > unlabeled; 2.0.0 > 1.0.0; newer labeled_at."""
+    labeled = row.get("target_relevance") is not None
+    ver = row.get("relevance_agent_version")
+    if labeled and not ver:
+        ver = "1.0.0"
+    is_v2 = ver == "2.0.0"
+    labeled_at = row.get("labeled_at") or ""
+    created_at = row.get("created_at") or ""
+    return (labeled, is_v2, labeled_at, created_at, int(row["id"]))
+
+
+def dedupe_training_sample_pairs(
+    db: sqlite3.Connection, *, dry_run: bool = False
+) -> dict[str, Any]:
+    """One active row per (query_id, corpus_item_id); keep best labeled row.
+
+    Preference: any label over none; among labels prefer relevance_agent_version
+    2.0.0 over 1.0.0 (null version on labeled rows counts as 1.0.0); then most
+    recent labeled_at. Losers get superseded_at. Winner pair_hash rewritten to
+    the retriever-free identity.
+    """
+    if dry_run:
+        backfilled = int(
+            db.execute(
+                """
+                SELECT COUNT(*) FROM training_samples
+                WHERE superseded_at IS NULL
+                  AND target_relevance IS NOT NULL
+                  AND relevance_agent_version IS NULL
+                """
+            ).fetchone()[0]
+        )
+    else:
+        backfilled = backfill_null_relevance_agent_versions(db)
+
+    rows = db.execute(
+        """
+        SELECT * FROM training_samples
+        WHERE superseded_at IS NULL
+        ORDER BY query_id, corpus_item_id, id
+        """
+    ).fetchall()
+    groups: dict[tuple[int, int], list[dict[str, Any]]] = {}
+    for row in rows:
+        d = training_sample_row_to_dict(row)
+        key = (int(d["query_id"]), int(d["corpus_item_id"]))
+        groups.setdefault(key, []).append(d)
+
+    now = _utcnow()
+    groups_deduped = 0
+    superseded = 0
+    hashes_rewritten = 0
+    kept_labeled = 0
+    kept_unlabeled = 0
+
+    for (_qid, _cid), members in groups.items():
+        winner = max(members, key=_training_sample_keep_key)
+        losers = [m for m in members if int(m["id"]) != int(winner["id"])]
+        if losers:
+            groups_deduped += 1
+        if winner.get("target_relevance") is not None:
+            kept_labeled += 1
+        else:
+            kept_unlabeled += 1
+
+        new_hash = sample_pair_hash(int(winner["query_id"]), int(winner["corpus_item_id"]))
+        if dry_run:
+            superseded += len(losers)
+            if winner.get("pair_hash") != new_hash:
+                hashes_rewritten += 1
+            continue
+
+        for loser in losers:
+            db.execute(
+                "UPDATE training_samples SET superseded_at = ? WHERE id = ?",
+                (now, int(loser["id"])),
+            )
+            superseded += 1
+        if winner.get("pair_hash") != new_hash:
+            db.execute(
+                "UPDATE training_samples SET pair_hash = ? WHERE id = ?",
+                (new_hash, int(winner["id"])),
+            )
+            hashes_rewritten += 1
+
+    return {
+        "dry_run": dry_run,
+        "null_versions_backfilled_to_1_0_0": backfilled,
+        "active_pairs": len(groups),
+        "groups_with_duplicates": groups_deduped,
+        "rows_superseded": superseded,
+        "hashes_rewritten": hashes_rewritten,
+        "kept_labeled": kept_labeled,
+        "kept_unlabeled": kept_unlabeled,
+    }
 
 
 def get_training_sample(db: sqlite3.Connection, sample_id: int) -> dict[str, Any] | None:
@@ -1372,6 +2193,13 @@ def list_unlabeled_samples(
     agent_version: str | None = None,
     force: bool = False,
 ) -> list[dict[str, Any]]:
+    """List samples for labeling.
+
+    Default: only rows with no ``target_relevance`` (incremental labeling).
+    ``force=True``: re-score every active sample (optional full refresh).
+    ``agent_version`` is unused for selection; kept for call-site compat.
+    """
+    del agent_version  # selection is by label presence, not version mismatch
     if force:
         sql = """
             SELECT * FROM training_samples
@@ -1384,12 +2212,11 @@ def list_unlabeled_samples(
         sql = """
             SELECT * FROM training_samples
             WHERE superseded_at IS NULL
-              AND (target_relevance IS NULL OR relevance_agent_version IS NULL
-                   OR relevance_agent_version != ?)
+              AND target_relevance IS NULL
             ORDER BY id
             LIMIT ?
         """
-        rows = db.execute(sql, (agent_version or "", limit)).fetchall()
+        rows = db.execute(sql, (limit,)).fetchall()
     return [training_sample_row_to_dict(r) for r in rows]
 
 
