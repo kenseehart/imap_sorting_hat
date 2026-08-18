@@ -158,10 +158,10 @@ def prism_reembed(
                     WHERE c.id IN ({placeholders})
                     ORDER BY c.id ASC
                 """
-                batch: list[tuple[int, list[float], dict[str, Any]]] = []
+                batch: list[tuple[int, Any, dict[str, Any]]] = []
                 for row in db.execute(row_sql, to_load).fetchall():
                     raw = compose_chunk_vector(db, int(row["id"]), chunk_repr)
-                    if not raw:
+                    if raw is None:
                         bar.update(1)
                         continue
                     ac = adapt_chunk_for_model(raw, model_id)

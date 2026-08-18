@@ -10,11 +10,11 @@ import numpy as np
 from sklearn.cluster import KMeans
 
 from fish.config import openai_api_key
-from fish.store import db_conn, init_db
+from fish.store import blob_to_embedding, db_conn, init_db
 from openai import OpenAI
 
 
-def _fetch_recent_embeddings(limit: int = 200) -> list[tuple[int, list[float], str]]:
+def _fetch_recent_embeddings(limit: int = 200) -> list[tuple[int, np.ndarray, str]]:
     init_db()
     with db_conn() as db:
         rows = db.execute(
@@ -29,8 +29,9 @@ def _fetch_recent_embeddings(limit: int = 200) -> list[tuple[int, list[float], s
         ).fetchall()
     result = []
     for row in rows:
-        blob = row["embedding"]
-        vec = np.frombuffer(blob, dtype=np.float32).tolist()
+        vec = blob_to_embedding(row["embedding"])
+        if vec is None:
+            continue
         result.append((int(row["id"]), vec, row["subject"] or ""))
     return result
 

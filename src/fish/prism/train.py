@@ -71,8 +71,8 @@ class TrainingPair:
     query: str
     chunk_id: int
     relevance: float
-    query_embedding: list[float] | None = None
-    chunk_embedding: list[float] | None = None
+    query_embedding: np.ndarray | None = None
+    chunk_embedding: np.ndarray | None = None
     retrieval_similarity: float | None = None
 
 
@@ -97,20 +97,22 @@ def load_training_pairs_from_db(
         missing_fields = 0
         for row in rows:
             q_emb = row.get("query_embedding")
-            if not isinstance(q_emb, list):
+            if not isinstance(q_emb, np.ndarray) or q_emb.size == 0:
                 continue
+            q_emb = np.asarray(q_emb, dtype=np.float32).reshape(-1)
             item_id = int(row["corpus_item_id"])
             if chunk_repr == CHUNK_REPR_COMBINED:
                 c_emb = row.get("message_embedding")
-                if not isinstance(c_emb, list):
+                if not isinstance(c_emb, np.ndarray) or c_emb.size == 0:
                     c_emb = get_raw_embedding(db, item_id)
             else:
                 c_emb = compose_chunk_vector(db, item_id, chunk_repr)
                 if c_emb is None:
                     missing_fields += 1
                     continue
-            if not isinstance(c_emb, list):
+            if not isinstance(c_emb, np.ndarray) or c_emb.size == 0:
                 continue
+            c_emb = np.asarray(c_emb, dtype=np.float32).reshape(-1)
             pairs.append(
                 TrainingPair(
                     query=row["query_text"],
@@ -175,15 +177,17 @@ def evaluate_model(model: PrismModel, pairs: list[TrainingPair]) -> dict[str, fl
         labels.append(pair.relevance)
         # Raw cosine only defined when dims match (combined). For header_body,
         # compare query to mean of h/b halves as a crude baseline.
-        if len(c) == len(q):
-            raw_scores.append(cosine_similarity(q, c))
-        elif len(c) == 2 * len(q):
-            half = len(q)
-            mean_c = [(c[i] + c[half + i]) * 0.5 for i in range(half)]
-            raw_scores.append(cosine_similarity(q, mean_c))
+        q_arr = np.asarray(q, dtype=np.float32).reshape(-1)
+        c_arr = np.asarray(c, dtype=np.float32).reshape(-1)
+        if c_arr.shape[0] == q_arr.shape[0]:
+            raw_scores.append(cosine_similarity(q_arr, c_arr))
+        elif c_arr.shape[0] == 2 * q_arr.shape[0]:
+            half = int(q_arr.shape[0])
+            mean_c = 0.5 * (c_arr[:half] + c_arr[half:])
+            raw_scores.append(cosine_similarity(q_arr, mean_c))
         else:
             raw_scores.append(0.0)
-        adapted_scores.append(model.score_pair(q, c))
+        adapted_scores.append(model.score_pair(q_arr, c_arr))
 
     return {
         "spearman_raw": _spearman(raw_scores, labels),
@@ -443,31 +447,34 @@ def train_prism_model(
         head = head.to(torch_device)
     _optimizer_to_device(opt, torch_device)
 
-    q_rows: list[list[float]] = []
-    c_rows: list[list[float]] = []
+    q_mats: list[np.ndarray] = []
+    c_mats: list[np.ndarray] = []
     rel_rows: list[float] = []
     for pair in pairs:
         if pair.query_embedding is None or pair.chunk_embedding is None:
             continue
-        if len(pair.query_embedding) != dim:
+        q_vec = np.asarray(pair.query_embedding, dtype=np.float32).reshape(-1)
+        c_vec = np.asarray(pair.chunk_embedding, dtype=np.float32).reshape(-1)
+        if q_vec.shape[0] != dim:
+            raise ValueError(f"query embed dim {q_vec.shape[0]} != {dim}")
+        if c_vec.shape[0] != chunk_in:
             raise ValueError(
-                f"query embed dim {len(pair.query_embedding)} != {dim}"
-            )
-        if len(pair.chunk_embedding) != chunk_in:
-            raise ValueError(
-                f"chunk embed dim {len(pair.chunk_embedding)} != {chunk_in} "
+                f"chunk embed dim {c_vec.shape[0]} != {chunk_in} "
                 f"(chunk_repr={chunk_repr})"
             )
-        q_rows.append(pair.query_embedding)
-        c_rows.append(pair.chunk_embedding)
+        q_mats.append(q_vec)
+        c_mats.append(c_vec)
         rel_rows.append(float(pair.relevance))
 
-    if not q_rows:
+    if not q_mats:
         raise ValueError("No training pairs with embeddings")
 
-    q_all = torch.tensor(q_rows, dtype=torch.float32, device=torch_device)
-    c_all = torch.tensor(c_rows, dtype=torch.float32, device=torch_device)
-    rel_all = torch.tensor(rel_rows, dtype=torch.float32, device=torch_device)
+    q_np = np.stack(q_mats).astype(np.float32, copy=False)
+    c_np = np.stack(c_mats).astype(np.float32, copy=False)
+    rel_np = np.asarray(rel_rows, dtype=np.float32)
+    q_all = torch.from_numpy(q_np).to(torch_device)
+    c_all = torch.from_numpy(c_np).to(torch_device)
+    rel_all = torch.from_numpy(rel_np).to(torch_device)
     n = q_all.shape[0]
     indices = list(range(n))
     every = max(1, int(checkpoint_every))

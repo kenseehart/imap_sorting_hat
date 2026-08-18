@@ -21,6 +21,7 @@ from fish.search import search_corpus
 from fish.smtp_client import send_email
 from fish.store import (
     db_conn,
+    embedding_as_list,
     get_corpus_by_id,
     get_draft,
     get_embedding,
@@ -224,9 +225,9 @@ def register_tools(mcp: Any, as_json: bool = True, audit_decorator: Any = None) 
                 {
                     "id": item_id,
                     "kind": row.get("kind"),
-                    "dim": len(vec),
+                    "dim": int(vec.shape[0]),
                     "embedded_at": row.get("embedded_at"),
-                    "embedding": vec,
+                    "embedding": embedding_as_list(vec),
                 }
             )
 

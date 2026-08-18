@@ -69,16 +69,16 @@ def _score_pairs(
     out: list[tuple[float, float]] = []
     for row in pairs:
         q = row.get("query_embedding")
-        if not isinstance(q, list):
+        if not isinstance(q, np.ndarray) or q.size == 0:
             continue
         item_id = int(row["corpus_item_id"])
         if chunk_repr == CHUNK_REPR_HEADER_BODY:
             c = compose_chunk_vector(db, item_id, CHUNK_REPR_HEADER_BODY)
         else:
             c = row.get("message_embedding")
-            if not isinstance(c, list):
+            if not isinstance(c, np.ndarray) or c.size == 0:
                 c = get_raw_embedding(db, item_id)
-        if not isinstance(c, list):
+        if not isinstance(c, np.ndarray) or c.size == 0:
             continue
         try:
             s = float(model.score_pair(q, c))

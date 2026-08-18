@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from fish.embed import embed_text
 from fish.prism.inference import (
     cosine_similarity,
     load_prism_model,
@@ -23,16 +22,16 @@ from fish.store import (
 Retriever = Literal["legacy"] | str
 
 
-def _raw_chunk_embedding_cache() -> dict[int, list[float]]:
+def _raw_chunk_embedding_cache() -> dict[int, Any]:
     return {}
 
 
 def get_raw_chunk_embedding(
     item_id: int,
     text_for_embed: str,
-    cache: dict[int, list[float]],
+    cache: dict[int, Any],
     db: Any | None = None,
-) -> list[float]:
+) -> Any:
     if item_id not in cache:
         stored = None
         if db is not None:
@@ -44,17 +43,24 @@ def get_raw_chunk_embedding(
 
             with db_conn() as conn:
                 stored = get_raw_embedding(conn, item_id)
-        cache[item_id] = stored if stored is not None else embed_text(text_for_embed)
+        if stored is not None:
+            cache[item_id] = stored
+        else:
+            import numpy as np
+
+            from fish.embed import embed_text
+
+            cache[item_id] = np.asarray(embed_text(text_for_embed), dtype=np.float32)
     return cache[item_id]
 
 
 def retrieve_top_k(
     db: Any,
-    query_embedding: list[float],
+    query_embedding: Any,
     *,
     retriever: str,
     top_k: int,
-    raw_cache: dict[int, list[float]],
+    raw_cache: dict[int, Any],
     prism_model: Any | None = None,
 ) -> list[tuple[int, float]]:
     """Return (corpus_item_id, retrieval_similarity) sorted best-first."""
@@ -65,7 +71,7 @@ def retrieve_top_k(
     else:
         if prism_model is None:
             prism_model = load_prism_model(retriever)
-        search_vec = prism_model.adapt_query(query_embedding).tolist()
+        search_vec = prism_model.adapt_query(query_embedding)
         search_model_id = retriever
 
     hits = corpus_vector_search(
@@ -85,8 +91,8 @@ def retrieve_top_k(
         else:
             if prism_model is None:
                 prism_model = load_prism_model(retriever)
-            aq = prism_model.adapt_query(query_embedding).tolist()
-            ac = prism_model.adapt_chunk(raw_c).tolist()
+            aq = prism_model.adapt_query(query_embedding)
+            ac = prism_model.adapt_chunk(raw_c)
             sim = cosine_similarity(aq, ac)
         scored.append((item_id, sim))
 
@@ -116,7 +122,7 @@ def collect_samples(
     samples_created = 0
     samples_updated = 0
     queries_processed = 0
-    raw_cache: dict[int, list[float]] = {}
+    raw_cache: dict[int, Any] = {}
 
     with db_conn() as db:
         queries = list_training_queries(db, require_embedding=False)

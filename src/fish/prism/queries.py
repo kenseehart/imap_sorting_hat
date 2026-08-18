@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import numpy as np
+
 from fish.config import embedding_model
 from fish.context import augment_query, parse_context
 from fish.embed import embed_text
@@ -23,7 +25,7 @@ def log_real_query(
     query: str,
     context_json: str | dict[str, Any] | None = None,
     *,
-    query_embedding: list[float] | None = None,
+    query_embedding: list[float] | np.ndarray | None = None,
 ) -> int | None:
     """Record a logged (gold) search query. Returns query id or None if duplicate."""
     init_db()
@@ -54,14 +56,16 @@ def log_real_query(
         return query_id
 
 
-def ensure_query_embedding(db: Any, query_row: dict[str, Any]) -> list[float]:
+def ensure_query_embedding(db: Any, query_row: dict[str, Any]) -> np.ndarray:
     existing = query_row.get("query_embedding")
+    if isinstance(existing, np.ndarray) and existing.size > 0:
+        return np.asarray(existing, dtype=np.float32).reshape(-1)
     if isinstance(existing, list) and existing:
-        return existing
+        return np.asarray(existing, dtype=np.float32).reshape(-1)
     augmented = query_text_for_search(
         query_row["text"], query_row.get("context_json")
     )
-    vec = embed_text(augmented)
+    vec = np.asarray(embed_text(augmented), dtype=np.float32).reshape(-1)
     update_training_query_embedding(
         db, int(query_row["id"]), vec, embedding_model()
     )

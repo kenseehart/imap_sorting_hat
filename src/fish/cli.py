@@ -598,7 +598,7 @@ def embedding_get(
     md_output: bool = False,
 ) -> int:
     """Return the stored embedding vector for a corpus item id."""
-    from fish.store import get_corpus_by_id, get_embedding
+    from fish.store import embedding_as_list, get_corpus_by_id, get_embedding
 
     init_db()
     with db_conn() as db:
@@ -613,9 +613,9 @@ def embedding_get(
         payload = {
             "id": item_id,
             "kind": row.get("kind"),
-            "dim": len(vec),
+            "dim": int(vec.shape[0]),
             "embedded_at": row.get("embedded_at"),
-            "embedding": vec,
+            "embedding": embedding_as_list(vec),
         }
     emit_output(payload, json_output=json_output, md=md_output, title=f"Embedding {item_id}")
     return 0

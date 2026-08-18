@@ -24,14 +24,32 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def embedding_to_blob(vec: list[float]) -> bytes:
-    return np.asarray(vec, dtype=np.float32).tobytes()
+def embedding_to_blob(vec: list[float] | np.ndarray) -> bytes:
+    return np.asarray(vec, dtype=np.float32).reshape(-1).tobytes()
 
 
-def blob_to_embedding(blob: bytes | None) -> list[float] | None:
+def blob_to_embedding(blob: bytes | None) -> np.ndarray | None:
+    """Decode a float32 embedding blob without expanding to Python floats.
+
+    Returns a contiguous ``float32`` copy so the array outlives the SQLite
+    buffer. Call ``embedding_as_list`` only at API edges that require lists
+    (e.g. some Qdrant client paths).
+    """
     if blob is None:
         return None
-    return np.frombuffer(blob, dtype=np.float32).tolist()
+    arr = np.frombuffer(blob, dtype=np.float32)
+    if arr.size == 0:
+        return None
+    return np.array(arr, dtype=np.float32, copy=True)
+
+
+def embedding_as_list(vec: list[float] | np.ndarray | None) -> list[float] | None:
+    """Convert an embedding to ``list[float]`` at an API boundary only."""
+    if vec is None:
+        return None
+    if isinstance(vec, list):
+        return vec
+    return np.asarray(vec, dtype=np.float32).reshape(-1).tolist()
 
 
 SCHEMA = f"""
@@ -690,12 +708,12 @@ def mark_memory_superseded(
     mark_samples_superseded_for_corpus(db, item_id)
 
 
-def get_embedding(db: sqlite3.Connection, item_id: int) -> list[float] | None:
+def get_embedding(db: sqlite3.Connection, item_id: int) -> np.ndarray | None:
     """Frozen OpenAI raw embedding c (SQLite corpus_raw_embeddings)."""
     return get_raw_embedding(db, item_id)
 
 
-def get_raw_embedding(db: sqlite3.Connection, item_id: int) -> list[float] | None:
+def get_raw_embedding(db: sqlite3.Connection, item_id: int) -> np.ndarray | None:
     """Frozen OpenAI combined embedding c from SQLite (durable; not Qdrant-only)."""
     row = db.execute(
         "SELECT embedding FROM corpus_raw_embeddings WHERE item_id = ?",
@@ -708,7 +726,7 @@ def get_raw_embedding(db: sqlite3.Connection, item_id: int) -> list[float] | Non
 
 def get_raw_field_embeddings(
     db: sqlite3.Connection, item_id: int
-) -> dict[str, list[float] | None]:
+) -> dict[str, np.ndarray | None]:
     """Return durable raw vectors: combined, header, body (SQLite only for fields)."""
     row = db.execute(
         """
@@ -730,8 +748,8 @@ def set_raw_field_embeddings(
     db: sqlite3.Connection,
     item_id: int,
     *,
-    header_embedding: list[float] | None = None,
-    body_embedding: list[float] | None = None,
+    header_embedding: list[float] | np.ndarray | None = None,
+    body_embedding: list[float] | np.ndarray | None = None,
 ) -> None:
     """Write header/body raw vectors to SQLite only (no Qdrant upsert)."""
     if header_embedding is None and body_embedding is None:
@@ -1121,17 +1139,19 @@ def get_model_embedding(
     return get_point_vector(model["vec_table"], item_id)
 
 
-def set_embedding(db: sqlite3.Connection, message_id: int, embedding: list[float]) -> None:
+def set_embedding(
+    db: sqlite3.Connection, message_id: int, embedding: list[float] | np.ndarray
+) -> None:
     set_corpus_embedding(db, message_id, embedding)
 
 
 def _store_raw_embedding(
     db: sqlite3.Connection,
     item_id: int,
-    embedding: list[float],
+    embedding: list[float] | np.ndarray,
     *,
-    header_embedding: list[float] | None = None,
-    body_embedding: list[float] | None = None,
+    header_embedding: list[float] | np.ndarray | None = None,
+    body_embedding: list[float] | np.ndarray | None = None,
 ) -> None:
     """Persist durable OpenAI raw vectors in SQLite (never Qdrant-only).
 
@@ -1173,11 +1193,11 @@ def _payload_for_item(db: sqlite3.Connection, item_id: int) -> dict[str, Any]:
 def set_corpus_embedding(
     db: sqlite3.Connection,
     item_id: int,
-    embedding: list[float],
+    embedding: list[float] | np.ndarray,
     *,
-    header_embedding: list[float] | None = None,
-    body_embedding: list[float] | None = None,
-    model_embeddings: dict[str, list[float]] | None = None,
+    header_embedding: list[float] | np.ndarray | None = None,
+    body_embedding: list[float] | np.ndarray | None = None,
+    model_embeddings: dict[str, list[float] | np.ndarray] | None = None,
 ) -> None:
     """Persist raw vectors in SQLite; upsert combined vector to Qdrant ANN.
 
@@ -1228,7 +1248,7 @@ def set_model_embedding(
     db: sqlite3.Connection,
     item_id: int,
     model_id: str,
-    embedding: list[float],
+    embedding: list[float] | np.ndarray,
 ) -> None:
     from fish.prism.configs import LEGACY_MODEL_ID
     from fish.prism.registry import get_retrieval_model
@@ -1387,7 +1407,7 @@ def list_corpus_with_raw_embedding(
     out: list[dict[str, Any]] = []
     for row in rows:
         raw = blob_to_embedding(row["embedding"])
-        if not raw:
+        if raw is None:
             continue
         out.append(
             {"id": int(row["id"]), "kind": row["kind"], "raw_embedding": raw}
@@ -1449,14 +1469,16 @@ def corpus_needing_embedding(
 
 
 def vector_search(
-    db: sqlite3.Connection, query_embedding: list[float], limit: int = 20
+    db: sqlite3.Connection,
+    query_embedding: list[float] | np.ndarray,
+    limit: int = 20,
 ) -> list[tuple[int, float]]:
     return corpus_vector_search(db, query_embedding, limit=limit)
 
 
 def corpus_vector_search(
     db: sqlite3.Connection,
-    query_embedding: list[float],
+    query_embedding: list[float] | np.ndarray,
     limit: int = 20,
     kinds: list[str] | None = None,
     *,
@@ -1848,14 +1870,14 @@ def insert_training_query(
     parent_query_id: int | None = None,
     synthesis_method: str | None = None,
     embed_model: str | None = None,
-    query_embedding: list[float] | None = None,
+    query_embedding: list[float] | np.ndarray | None = None,
     source: str | None = None,
     meta_json: str | None = None,
 ) -> int | None:
     """Insert a training query. Returns id, or None if duplicate."""
     now = _utcnow()
     thash = query_text_hash(text)
-    blob = embedding_to_blob(query_embedding) if query_embedding else None
+    blob = embedding_to_blob(query_embedding) if query_embedding is not None else None
     try:
         cur = db.execute(
             """
@@ -1983,7 +2005,7 @@ def pick_random_training_queries(
 
 
 def update_training_query_embedding(
-    db: sqlite3.Connection, query_id: int, embedding: list[float], embed_model: str
+    db: sqlite3.Connection, query_id: int, embedding: list[float] | np.ndarray, embed_model: str
 ) -> None:
     db.execute(
         """
@@ -2021,8 +2043,8 @@ def insert_training_sample(
     retriever: str,
     retrieval_similarity: float,
     retrieval_rank: int,
-    query_embedding: list[float],
-    message_embedding: list[float],
+    query_embedding: list[float] | np.ndarray,
+    message_embedding: list[float] | np.ndarray,
 ) -> int | None:
     """Insert sample. Returns id, or None if (query, item) already exists.
 

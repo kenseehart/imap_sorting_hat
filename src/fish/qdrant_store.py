@@ -14,6 +14,15 @@ from fish.config import EMBED_DIM, load_env
 from fish.prism.configs import collection_for_model_id
 
 
+def _vector_for_qdrant(embedding: Any) -> list[float]:
+    """Qdrant PointStruct requires a Python list; convert at this edge only."""
+    import numpy as np
+
+    if isinstance(embedding, np.ndarray):
+        return embedding.astype(np.float32, copy=False).reshape(-1).tolist()
+    return [float(x) for x in embedding]
+
+
 def qdrant_url() -> str:
     load_env()
     return os.getenv("FISH_QDRANT_URL", "http://127.0.0.1:6333").strip()
@@ -174,7 +183,7 @@ def build_payload(row: dict[str, Any]) -> dict[str, Any]:
 def upsert_point(
     collection: str,
     item_id: int,
-    embedding: list[float],
+    embedding: list[float] | Any,
     payload: dict[str, Any],
 ) -> None:
     ensure_collection(collection)
@@ -183,7 +192,7 @@ def upsert_point(
         points=[
             qm.PointStruct(
                 id=int(item_id),
-                vector=[float(x) for x in embedding],
+                vector=_vector_for_qdrant(embedding),
                 payload=payload,
             )
         ],
@@ -193,7 +202,7 @@ def upsert_point(
 
 def upsert_points_batch(
     collection: str,
-    points: list[tuple[int, list[float], dict[str, Any]]],
+    points: list[tuple[int, Any, dict[str, Any]]],
 ) -> None:
     if not points:
         return
@@ -203,7 +212,7 @@ def upsert_points_batch(
         points=[
             qm.PointStruct(
                 id=int(item_id),
-                vector=[float(x) for x in emb],
+                vector=_vector_for_qdrant(emb),
                 payload=payload,
             )
             for item_id, emb, payload in points
@@ -347,7 +356,7 @@ def _build_filter(
 
 def search(
     collection: str,
-    query_embedding: list[float],
+    query_embedding: list[float] | Any,
     *,
     limit: int = 20,
     kinds: list[str] | None = None,
@@ -371,7 +380,7 @@ def search(
     )
     hits = get_qdrant_client().query_points(
         collection_name=collection,
-        query=[float(x) for x in query_embedding],
+        query=_vector_for_qdrant(query_embedding),
         query_filter=qfilter,
         limit=int(limit),
         with_payload=False,

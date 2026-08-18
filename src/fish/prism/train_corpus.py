@@ -176,8 +176,12 @@ def write_tcz(
     out = path or tcz_path_for_id(cid)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    q = np.asarray([p.query_embedding for p in pairs], dtype=np.float32)
-    c = np.asarray([p.chunk_embedding for p in pairs], dtype=np.float32)
+    q = np.stack(
+        [np.asarray(p.query_embedding, dtype=np.float32).reshape(-1) for p in pairs]
+    ).astype(np.float32, copy=False)
+    c = np.stack(
+        [np.asarray(p.chunk_embedding, dtype=np.float32).reshape(-1) for p in pairs]
+    ).astype(np.float32, copy=False)
     rel = np.asarray([p.relevance for p in pairs], dtype=np.float32)
     chunk_ids = np.asarray([p.chunk_id for p in pairs], dtype=np.int64)
     queries = [p.query for p in pairs]
@@ -256,8 +260,9 @@ def load_tcz(path: Path | str) -> FrozenCorpus:
                 query=queries[i],
                 chunk_id=int(chunk_ids[i]),
                 relevance=float(rel[i]),
-                query_embedding=q[i].tolist(),
-                chunk_embedding=c[i].tolist(),
+                # Row views into the loaded matrices — keep float32, no list expand.
+                query_embedding=q[i],
+                chunk_embedding=c[i],
                 retrieval_similarity=(
                     float(retrieval[i]) if retrieval is not None else None
                 ),

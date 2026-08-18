@@ -216,11 +216,11 @@ def reindex_legacy_qdrant(
                     ORDER BY c.id ASC
                 """
                 rows = db.execute(row_sql, to_load).fetchall()
-                batch: list[tuple[int, list[float], dict[str, Any]]] = []
+                batch: list[tuple[int, Any, dict[str, Any]]] = []
                 for row in rows:
                     item_id = int(row["id"])
                     emb = blob_to_embedding(row["embedding"])
-                    if not emb:
+                    if emb is None:
                         bar.update(1)
                         continue
                     corpus = {

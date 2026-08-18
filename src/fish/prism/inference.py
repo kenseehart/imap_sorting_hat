@@ -50,39 +50,43 @@ def get_prism_model() -> PrismModel | None:
     return _loaded_model()
 
 
-def adapt_query_embedding(vec: list[float]) -> list[float]:
+def adapt_query_embedding(vec: list[float] | np.ndarray) -> np.ndarray:
+    arr = np.asarray(vec, dtype=np.float32).reshape(-1)
     model = get_prism_model()
     if model is None:
-        return vec
-    adapted = model.adapt_query(vec)
-    return adapted.astype(np.float32).tolist()
+        return arr
+    return model.adapt_query(arr).astype(np.float32)
 
 
-def adapt_chunk_embedding(vec: list[float]) -> list[float]:
+def adapt_chunk_embedding(vec: list[float] | np.ndarray) -> np.ndarray:
+    arr = np.asarray(vec, dtype=np.float32).reshape(-1)
     model = get_prism_model()
     if model is None:
-        return vec
-    adapted = model.adapt_chunk(vec)
-    return adapted.astype(np.float32).tolist()
+        return arr
+    return model.adapt_chunk(arr).astype(np.float32)
 
 
-def adapt_chunk_for_model(vec: list[float], model_id: str) -> list[float]:
+def adapt_chunk_for_model(vec: list[float] | np.ndarray, model_id: str) -> np.ndarray:
+    arr = np.asarray(vec, dtype=np.float32).reshape(-1)
     if model_id == LEGACY_MODEL_ID:
-        return vec
+        return arr
     model = load_prism_model(model_id)
-    return model.adapt_chunk(vec).astype(np.float32).tolist()
+    return model.adapt_chunk(arr).astype(np.float32)
 
 
-def adapt_query_for_model(vec: list[float], model_id: str) -> list[float]:
+def adapt_query_for_model(vec: list[float] | np.ndarray, model_id: str) -> np.ndarray:
+    arr = np.asarray(vec, dtype=np.float32).reshape(-1)
     if model_id == LEGACY_MODEL_ID:
-        return vec
+        return arr
     model = load_prism_model(model_id)
-    return model.adapt_query(vec).astype(np.float32).tolist()
+    return model.adapt_query(arr).astype(np.float32)
 
 
-def cosine_similarity(a: list[float], b: list[float]) -> float:
-    va = np.asarray(a, dtype=np.float32)
-    vb = np.asarray(b, dtype=np.float32)
+def cosine_similarity(
+    a: list[float] | np.ndarray, b: list[float] | np.ndarray
+) -> float:
+    va = np.asarray(a, dtype=np.float32).reshape(-1)
+    vb = np.asarray(b, dtype=np.float32).reshape(-1)
     denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
     if denom == 0:
         return 0.0
@@ -93,7 +97,7 @@ def compose_chunk_vector(
     db: Any,
     item_id: int,
     chunk_repr: str,
-) -> list[float] | None:
+) -> np.ndarray | None:
     """Frozen chunk vector from SQLite raw embeds for train / re-index."""
     from fish.prism.model import CHUNK_REPR_COMBINED, CHUNK_REPR_HEADER_BODY
     from fish.store import get_raw_embedding, get_raw_field_embeddings
@@ -105,5 +109,10 @@ def compose_chunk_vector(
         h, b = fields.get("header"), fields.get("body")
         if h is None or b is None:
             return None
-        return list(h) + list(b)
+        return np.concatenate(
+            [
+                np.asarray(h, dtype=np.float32).reshape(-1),
+                np.asarray(b, dtype=np.float32).reshape(-1),
+            ]
+        )
     raise ValueError(f"Unknown chunk_repr {chunk_repr!r}")
