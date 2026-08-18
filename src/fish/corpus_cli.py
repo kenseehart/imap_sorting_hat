@@ -155,6 +155,38 @@ def freeze_training(
 
 
 @corpus.cmd(output=True)
+def corpora(
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """List frozen training corpora (.tcz) with label counts from the JSON header."""
+    from fish.prism.train_corpus import list_frozen_corpora_info
+
+    load_env()
+    rows = list_frozen_corpora_info()
+    if not json_output:
+        rows = [
+            {
+                "corpus_id": r["corpus_id"],
+                "n_labels": r["n_labels"],
+                "chunk_repr": r.get("chunk_repr"),
+                "created_at": r.get("created_at"),
+                "size_bytes": r.get("size_bytes"),
+                "path": r.get("path"),
+            }
+            for r in rows
+        ]
+    emit_output(
+        rows,
+        json_output=json_output,
+        md=md_output,
+        title=f"Frozen corpora ({len(rows)})",
+    )
+    return 0
+
+
+@corpus.cmd(output=True)
 def inject_positives(
     query: str = optarg(..., long_flag="--query", help="Training query text (created if missing)"),
     like: str = optarg(
@@ -211,10 +243,13 @@ def stats(
     json_output: bool = False,
     md_output: bool = False,
 ) -> int:
-    """Show training query and sample counts."""
+    """Show training query and sample counts (includes frozen corpora + n_labels)."""
+    from fish.prism.train_corpus import list_frozen_corpora_info
+
     init_db()
     with db_conn() as db:
         report = training_corpus_stats(db)
+    report["frozen_corpora"] = list_frozen_corpora_info()
     emit_output(report, json_output=json_output, md=md_output, title="Fish corpus stats")
     return 0
 

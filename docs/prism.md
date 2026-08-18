@@ -58,8 +58,10 @@ Re-run the same command to **resume**; `--fresh` discards the checkpoint and sta
 new `model_id`. Finished runs delete the checkpoint after writing the `.prz`.
 
 Training snapshot: ``fish corpus freeze-training`` writes
-``models/corpora/train_corpus_{UTC}.tcz`` (zip of float32 ``q``/``c``/``rel`` +
-meta). Keeps at most **3** frozen corpora (oldest deleted automatically).
+``models/corpora/train_corpus_{UTC}.tcz`` (v2: JSON header with ``n_labels``,
+then a zip of float32 ``q``/``c``/``rel``). List with ``fish corpus corpora``.
+Keeps at most **3** frozen corpora (oldest deleted automatically). v1 bare-zip
+``.tcz`` files are deleted, not migrated.
 ``fish prism-train`` defaults to ``--corpus latest`` and **never opens
 fish.db** for epochs (resume fingerprint binds to the ``.tcz`` ``corpus_id``).
 Freeze a new snapshot when labels change; ``--from-db`` freezes then trains;

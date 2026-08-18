@@ -110,8 +110,10 @@ fish connect <email>
 | `fish corpus collect` | `--retriever legacy\|personal`, synthesize queries, top-k samples |
 | `fish corpus inject-positives` | Force (query, doc) pairs into training set (cold-start) |
 | `fish corpus label` | RelevanceAgent labels (`target_relevance`) |
-| `fish corpus freeze-training` | Snapshot labeled embeds → `models/corpora/train_corpus_{ts}.tcz` |
-| `fish corpus stats` | Query/sample counts |
+| `fish pipeline-status` / MCP `fish_pipeline_status` | Lock, label counts, frozen corpora (`n_labels`), models, local compute jobs — prefer over SSH |
+| `fish corpus freeze-training` | Snapshot labeled embeds → `models/corpora/train_corpus_{ts}.tcz` (v2 JSON header + zip; lists `n_labels`) |
+| `fish corpus corpora` | List frozen `.tcz` files with label counts |
+| `fish corpus stats` | Query/sample counts (+ frozen corpora) |
 | `fish corpus queries` | Dump training queries (`--origin gold\|curated\|synth`, `--source`, `--json`) |
 | `fish corpus add-curated` | Load `config/gold_queries.jsonl` as `origin=curated` (`add-gold` alias) |
 | `fish corpus purge` | Remove stale or superseded samples |
@@ -123,7 +125,7 @@ fish connect <email>
 
 ## MCP tools
 
-Read: `fish_search` (auto-syncs when stale; fails loudly on auth errors; `context_json`, `kinds`), `fish_corpus_get`, `fish_embedding_get`, `fish_message_get`, `fish_thread_get`, `fish_sync_status`, `fish_priority_inbox`, `fish_digest`, `fish_topics_*`, `fish_import`, `fish_memory_upsert`
+Read: `fish_search` (auto-syncs when stale; fails loudly on auth errors; `context_json`, `kinds`), `fish_corpus_get`, `fish_embedding_get`, `fish_message_get`, `fish_thread_get`, `fish_sync_status`, `fish_pipeline_status`, `fish_priority_inbox`, `fish_digest`, `fish_topics_*`, `fish_import`, `fish_memory_upsert`
 
 Write: `fish_sync_run`, `fish_message_move`, `fish_message_archive`, `fish_bulk_action`, `fish_compose`, `fish_send`
 

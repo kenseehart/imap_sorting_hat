@@ -41,6 +41,7 @@ FISH_INSTRUCTIONS = (
     "FAILS LOUDLY on email auth errors (missing/invalid passwords) — do not invent results; "
     "report the auth error and ask Ken to fix credentials on the fish host "
     "(`fish connect <email>` or redeploy fish.env). "
+    "For PRISM train/label/freeze progress prefer fish_pipeline_status over SSH. "
     "Search with fish_search (optional context_json). Use fish_bulk_action "
     "with dry_run=true first unless the user explicitly asked to proceed immediately."
 )
@@ -49,6 +50,7 @@ FISH_TOOL_NAMES = [
     "fish_auth_status",
     "fish_sync_run",
     "fish_sync_status",
+    "fish_pipeline_status",
     "fish_search",
     "fish_message_get",
     "fish_corpus_get",
@@ -128,6 +130,17 @@ def register_tools(mcp: Any, as_json: bool = True, audit_decorator: Any = None) 
         init_db()
         with db_conn() as db:
             return out(sync_status(db))
+
+    @tool()
+    def fish_pipeline_status(job_limit: int = 20, log_tail: int = 12) -> Any:
+        """PRISM pipeline snapshot: lock, label counts, frozen corpora (n_labels), models, local compute jobs.
+
+        Prefer this over SSH for status. Runs on the fish host and reads local
+        files/DB only (detached job dirs under FISH_DATA_DIR/compute/jobs).
+        """
+        from fish.pipeline_status import pipeline_status
+
+        return out(pipeline_status(job_limit=job_limit, log_tail=log_tail))
 
     @tool()
     def fish_search(

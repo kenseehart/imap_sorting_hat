@@ -1,8 +1,10 @@
-"""Frozen training corpus (``.tcz``) — pytorch-ready zip snapshot.
+"""Frozen training corpus (``.tcz``) — pytorch-ready snapshot.
 
-``fish corpus freeze-training`` reads labeled pairs from SQLite once and writes
-``models/corpora/train_corpus_{timestamp}.tcz``. ``fish prism-train`` loads a
-``.tcz`` and never opens fish.db for the epoch loop.
+Format (v2): one JSON metadata line, then a zip of float32 arrays.
+``fish corpus freeze-training`` writes ``models/corpora/train_corpus_{ts}.tcz``.
+``fish prism-train`` loads a ``.tcz`` and never opens fish.db for the epoch loop.
+
+v1 (bare zip) is not supported — incompatible files are deleted, not migrated.
 """
 
 from __future__ import annotations
@@ -24,11 +26,15 @@ from fish.write_lock import fish_write_lock
 if TYPE_CHECKING:
     from fish.prism.train import TrainingPair
 
-TCZ_VERSION = 1
+TCZ_VERSION = 2
 TCZ_SUFFIX = ".tcz"
 VALID_CHUNK_REPRS = frozenset({CHUNK_REPR_COMBINED, CHUNK_REPR_HEADER_BODY})
 # Keep at most this many train_corpus_*.tcz files under models/corpora/.
 MAX_FROZEN_CORPORA = 3
+
+
+class IncompatibleTczError(RuntimeError):
+    """``.tcz`` is not a supported version (e.g. v1 bare zip)."""
 
 
 def corpora_dir() -> Path:
@@ -65,8 +71,80 @@ def tcz_path_for_id(corpus_id: str) -> Path:
 
 
 def list_frozen_corpora() -> list[Path]:
+    """Return v2 ``.tcz`` paths only (deletes incompatible files first)."""
+    delete_incompatible_frozen_corpora()
     root = corpora_dir()
     return sorted(p for p in root.glob(f"train_corpus_*{TCZ_SUFFIX}") if p.is_file())
+
+
+def read_tcz_meta(path: Path | str) -> dict[str, Any]:
+    """Read leading JSON metadata without loading embedding arrays."""
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"Frozen corpus not found: {p}")
+    with p.open("rb") as f:
+        head = f.read(2)
+        if head == b"PK":
+            raise IncompatibleTczError(
+                f"{p.name}: v1 zip .tcz is unsupported — delete and re-freeze"
+            )
+        f.seek(0)
+        line = f.readline()
+        if not line.strip():
+            raise IncompatibleTczError(f"{p.name}: empty or missing JSON header")
+        try:
+            meta = json.loads(line.decode("utf-8"))
+        except json.JSONDecodeError as exc:
+            raise IncompatibleTczError(
+                f"{p.name}: invalid JSON header ({exc})"
+            ) from exc
+    if not isinstance(meta, dict):
+        raise IncompatibleTczError(f"{p.name}: JSON header must be an object")
+    version = int(meta.get("version") or 0)
+    if version != TCZ_VERSION:
+        raise IncompatibleTczError(
+            f"{p.name}: unsupported .tcz version {version} (expected {TCZ_VERSION})"
+        )
+    return meta
+
+
+def delete_incompatible_frozen_corpora() -> list[str]:
+    """Delete ``.tcz`` files that are not current-version (no migration)."""
+    root = corpora_dir()
+    deleted: list[str] = []
+    for path in sorted(p for p in root.glob(f"train_corpus_*{TCZ_SUFFIX}") if p.is_file()):
+        try:
+            read_tcz_meta(path)
+        except (IncompatibleTczError, OSError, UnicodeDecodeError):
+            cid = corpus_id_from_path(path)
+            path.unlink(missing_ok=True)
+            deleted.append(cid)
+    return deleted
+
+
+def list_frozen_corpora_info() -> list[dict[str, Any]]:
+    """List frozen corpora with label counts from the JSON header."""
+    delete_incompatible_frozen_corpora()
+    out: list[dict[str, Any]] = []
+    for path in list_frozen_corpora():
+        meta = read_tcz_meta(path)
+        n_labels = int(meta.get("n_labels") or meta.get("n_pairs") or 0)
+        out.append(
+            {
+                "corpus_id": str(meta.get("corpus_id") or corpus_id_from_path(path)),
+                "path": str(path),
+                "n_labels": n_labels,
+                "n_pairs": int(meta.get("n_pairs") or n_labels),
+                "chunk_repr": meta.get("chunk_repr"),
+                "retriever": meta.get("retriever"),
+                "created_at": meta.get("created_at"),
+                "q_dim": meta.get("q_dim"),
+                "c_dim": meta.get("c_dim"),
+                "size_bytes": path.stat().st_size,
+                "version": int(meta.get("version") or TCZ_VERSION),
+            }
+        )
+    return out
 
 
 def prune_old_frozen_corpora(
@@ -115,6 +193,7 @@ def resolve_corpus_path(corpus: str | Path) -> Path:
             path = path.with_suffix(TCZ_SUFFIX)
         if not path.is_file():
             raise FileNotFoundError(f"Frozen corpus not found: {path}")
+        read_tcz_meta(path)  # reject v1
         return path.resolve()
 
     # Bare id (with or without train_corpus_ / .tcz suffix)
@@ -124,6 +203,7 @@ def resolve_corpus_path(corpus: str | Path) -> Path:
             f"Frozen corpus not found: {resolved}. "
             f"Run freeze-training or pass --corpus latest."
         )
+    read_tcz_meta(resolved)
     return resolved.resolve()
 
 
@@ -136,6 +216,7 @@ class FrozenCorpus:
     created_at: str
     pairs: list[TrainingPair]
     retrieval_similarity: list[float] | None = None
+    n_labels: int = 0
 
     @property
     def n_pairs(self) -> int:
@@ -152,6 +233,30 @@ def _np_load_bytes(data: bytes) -> np.ndarray:
     return np.load(io.BytesIO(data), allow_pickle=False)
 
 
+def _build_meta(
+    *,
+    cid: str,
+    chunk_repr: str,
+    retriever: str | None,
+    created_at: str,
+    n_pairs: int,
+    q_dim: int,
+    c_dim: int,
+) -> dict[str, Any]:
+    return {
+        "version": TCZ_VERSION,
+        "corpus_id": cid,
+        "chunk_repr": chunk_repr,
+        "retriever": retriever,
+        "created_at": created_at,
+        "n_labels": n_pairs,
+        "n_pairs": n_pairs,
+        "q_dim": q_dim,
+        "c_dim": c_dim,
+        "has_retrieval_similarity": True,
+    }
+
+
 def write_tcz(
     pairs: list[TrainingPair],
     *,
@@ -161,7 +266,7 @@ def write_tcz(
     path: Path | None = None,
     retrieval_similarity: list[float] | None = None,
 ) -> Path:
-    """Atomically write a frozen training corpus zip (no DB lock required)."""
+    """Atomically write a v2 frozen corpus (JSON header + zip; no DB lock)."""
     if not pairs:
         raise ValueError("Cannot freeze empty training pair list")
     if chunk_repr not in VALID_CHUNK_REPRS:
@@ -171,6 +276,8 @@ def write_tcz(
     for i, p in enumerate(pairs):
         if p.query_embedding is None or p.chunk_embedding is None:
             raise ValueError(f"pair[{i}] missing embeddings")
+
+    delete_incompatible_frozen_corpora()
 
     cid = corpus_id or make_corpus_id()
     out = path or tcz_path_for_id(cid)
@@ -193,31 +300,38 @@ def write_tcz(
             for p in pairs
         ]
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    meta = {
-        "version": TCZ_VERSION,
-        "corpus_id": cid,
-        "chunk_repr": chunk_repr,
-        "retriever": retriever,
-        "created_at": created_at,
-        "n_pairs": len(pairs),
-        "q_dim": int(q.shape[1]),
-        "c_dim": int(c.shape[1]),
-        "has_retrieval_similarity": True,
-    }
+    meta = _build_meta(
+        cid=cid,
+        chunk_repr=chunk_repr,
+        retriever=retriever,
+        created_at=created_at,
+        n_pairs=len(pairs),
+        q_dim=int(q.shape[1]),
+        c_dim=int(c.shape[1]),
+    )
 
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # meta.json kept inside zip as a redundant copy of the file header.
+        zf.writestr("meta.json", json.dumps(meta, indent=2, sort_keys=True))
+        zf.writestr("queries.json", json.dumps(queries))
+        zf.writestr("q.npy", _np_save_bytes(q))
+        zf.writestr("c.npy", _np_save_bytes(c))
+        zf.writestr("rel.npy", _np_save_bytes(rel))
+        zf.writestr("chunk_ids.npy", _np_save_bytes(chunk_ids))
+        rs = np.asarray(retrieval_similarity, dtype=np.float32)
+        if len(rs) != len(pairs):
+            raise ValueError("retrieval_similarity length must match pairs")
+        zf.writestr("retrieval_similarity.npy", _np_save_bytes(rs))
+
+    header = (json.dumps(meta, separators=(",", ":"), sort_keys=True) + "\n").encode(
+        "utf-8"
+    )
     tmp = out.with_suffix(out.suffix + ".tmp")
     try:
-        with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("meta.json", json.dumps(meta, indent=2, sort_keys=True))
-            zf.writestr("queries.json", json.dumps(queries))
-            zf.writestr("q.npy", _np_save_bytes(q))
-            zf.writestr("c.npy", _np_save_bytes(c))
-            zf.writestr("rel.npy", _np_save_bytes(rel))
-            zf.writestr("chunk_ids.npy", _np_save_bytes(chunk_ids))
-            rs = np.asarray(retrieval_similarity, dtype=np.float32)
-            if len(rs) != len(pairs):
-                raise ValueError("retrieval_similarity length must match pairs")
-            zf.writestr("retrieval_similarity.npy", _np_save_bytes(rs))
+        with tmp.open("wb") as f:
+            f.write(header)
+            f.write(zip_buf.getvalue())
         tmp.replace(out)
     except Exception:
         if tmp.is_file():
@@ -232,13 +346,34 @@ def load_tcz(path: Path | str) -> FrozenCorpus:
     p = Path(path)
     if not p.is_file():
         raise FileNotFoundError(f"Frozen corpus not found: {p}")
-    with zipfile.ZipFile(p, "r") as zf:
-        meta = json.loads(zf.read("meta.json").decode())
-        version = int(meta.get("version") or 0)
-        if version != TCZ_VERSION:
-            raise RuntimeError(
-                f"Unsupported .tcz version {version} (expected {TCZ_VERSION})"
+    with p.open("rb") as f:
+        head = f.read(2)
+        if head == b"PK":
+            raise IncompatibleTczError(
+                f"{p.name}: v1 zip .tcz is unsupported — delete and re-freeze"
             )
+        f.seek(0)
+        line = f.readline()
+        try:
+            file_meta = json.loads(line.decode("utf-8"))
+        except json.JSONDecodeError as exc:
+            raise IncompatibleTczError(
+                f"{p.name}: invalid JSON header ({exc})"
+            ) from exc
+        zip_bytes = f.read()
+
+    version = int(file_meta.get("version") or 0)
+    if version != TCZ_VERSION:
+        raise IncompatibleTczError(
+            f"{p.name}: unsupported .tcz version {version} (expected {TCZ_VERSION})"
+        )
+
+    with zipfile.ZipFile(io.BytesIO(zip_bytes), "r") as zf:
+        meta = json.loads(zf.read("meta.json").decode())
+        # Prefer file header counts if zip meta is missing keys.
+        for key in ("n_labels", "n_pairs", "corpus_id", "chunk_repr", "created_at"):
+            if key not in meta and key in file_meta:
+                meta[key] = file_meta[key]
         queries: list[str] = json.loads(zf.read("queries.json").decode())
         q = _np_load_bytes(zf.read("q.npy"))
         c = _np_load_bytes(zf.read("c.npy"))
@@ -271,6 +406,7 @@ def load_tcz(path: Path | str) -> FrozenCorpus:
     chunk_repr = str(meta.get("chunk_repr") or CHUNK_REPR_COMBINED)
     if chunk_repr not in VALID_CHUNK_REPRS:
         raise RuntimeError(f"Corrupt .tcz {p}: bad chunk_repr {chunk_repr!r}")
+    n_labels = int(meta.get("n_labels") or meta.get("n_pairs") or n)
     return FrozenCorpus(
         corpus_id=str(meta.get("corpus_id") or corpus_id_from_path(p)),
         path=p,
@@ -279,6 +415,7 @@ def load_tcz(path: Path | str) -> FrozenCorpus:
         created_at=str(meta.get("created_at") or ""),
         pairs=pairs,
         retrieval_similarity=retrieval,
+        n_labels=n_labels,
     )
 
 
@@ -330,14 +467,17 @@ def freeze_training_corpus(
         corpus_id=corpus_id,
     )
     pruned = prune_old_frozen_corpora()
+    removed_old = delete_incompatible_frozen_corpora()
 
     result: dict[str, Any] = {
         "corpus_id": corpus_id,
         "path": str(path),
+        "n_labels": len(pairs),
         "n_pairs": len(pairs),
         "chunk_repr": chunk_repr,
         "retriever": retriever,
         "pruned": pruned,
+        "deleted_incompatible": removed_old,
     }
     if field_prep is not None:
         result["field_prep"] = field_prep

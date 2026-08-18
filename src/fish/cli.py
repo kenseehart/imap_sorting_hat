@@ -938,6 +938,22 @@ def write_lock_status(*, json_output: bool = False, md_output: bool = False) -> 
     return 0
 
 
+@cmd(output=True)
+def pipeline_status(
+    job_limit: int = optarg(20, long_flag="--job-limit", help="Max compute job dirs"),
+    log_tail: int = optarg(12, long_flag="--log-tail", help="Log lines per job"),
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """PRISM pipeline snapshot (lock, labels, frozen corpora, models, local jobs)."""
+    from fish.pipeline_status import pipeline_status as build_status
+
+    payload = build_status(job_limit=job_limit, log_tail=log_tail)
+    emit_output(payload, json_output=json_output, md=md_output, title="Fish pipeline status")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     from fish.corpus_cli import corpus
 
