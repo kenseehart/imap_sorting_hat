@@ -292,16 +292,27 @@ def prism_train(
     output: str | None = optarg(
         None, long_flag="--output", help="Output .prz path (default models/{model_id}.prz)"
     ),
+    corpus: str = optarg(
+        "latest",
+        long_flag="--corpus",
+        help="Frozen .tcz: latest (default), train_corpus_* id, or path",
+    ),
+    from_db: bool = optarg(
+        False,
+        long_flag="--from-db",
+        action="store_true",
+        help="Freeze a new .tcz from fish.db then train it (touches DB only for freeze)",
+    ),
     retriever: str | None = optarg(
         None,
         long_flag="--retriever",
-        help="Train on samples from this retriever only",
+        help="When freezing (--from-db / --collect-first): samples from this retriever only",
     ),
     collect_first: bool = optarg(
         False,
         long_flag="--collect-first",
         action="store_true",
-        help="Run corpus collect+label before training",
+        help="Run corpus collect+label, freeze a .tcz, then train",
     ),
     collect_retriever: str = optarg(
         "legacy",
@@ -333,16 +344,45 @@ def prism_train(
         action="store_true",
         help="Do not auto-resume from models/checkpoints/{config}.pt",
     ),
+    device: str | None = optarg(
+        None,
+        long_flag="--device",
+        help="Train device: auto (default), cpu, cuda, or cuda:N",
+    ),
+    gpu: bool = optarg(
+        False,
+        long_flag="--gpu",
+        action="store_true",
+        help="Train on CUDA (alias for --device cuda); easy CPU vs GPU A/B",
+    ),
+    no_register: bool = optarg(
+        False,
+        long_flag="--no-register",
+        action="store_true",
+        help="Skip writing retrieval_models row (offline train; no fish.db at end)",
+    ),
     *,
     json_output: bool = False,
     md_output: bool = False,
 ) -> int:
-    """Train PRISM adapters → {config}.{timestamp}.prz and register in retrieval_models."""
+    """Train PRISM adapters from a frozen .tcz → {config}.{timestamp}.prz."""
     from pathlib import Path
 
     from fish.prism.train import train_from_corpus
 
     load_env()
+    if gpu and device is not None and device.strip().lower() not in (
+        "cuda",
+        "gpu",
+        "auto",
+        "",
+    ):
+        print(
+            f"--gpu conflicts with --device {device!r} (use one or the other)",
+            file=sys.stderr,
+        )
+        return 1
+    train_device = "cuda" if gpu else device
     try:
         result = train_from_corpus(
             config_name=config,
@@ -357,6 +397,10 @@ def prism_train(
             overfit=overfit,
             resume=not no_resume,
             fresh=fresh,
+            device=train_device,
+            corpus=corpus,
+            from_db=from_db,
+            register=not no_register,
         )
     except Exception as exc:
         print(exc, file=sys.stderr)
@@ -882,7 +926,7 @@ def repair_headers(
 
 @cmd(output=True)
 def write_lock_status(*, json_output: bool = False, md_output: bool = False) -> int:
-    """Show whether a Fish DB write lock is held (sync, import, corpus, train)."""
+    """Show whether the Fish DB write flock is held (probe; dead PIDs cannot stick)."""
     status = read_lock_status()
     payload = {
         "held": status.held,

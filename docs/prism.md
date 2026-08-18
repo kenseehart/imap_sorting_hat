@@ -57,6 +57,22 @@ Checkpoints: each epoch writes `models/checkpoints/{config}.pt` (weights + optim
 Re-run the same command to **resume**; `--fresh` discards the checkpoint and starts a
 new `model_id`. Finished runs delete the checkpoint after writing the `.prz`.
 
+Training snapshot: ``fish corpus freeze-training`` writes
+``models/corpora/train_corpus_{UTC}.tcz`` (zip of float32 ``q``/``c``/``rel`` +
+meta). Keeps at most **3** frozen corpora (oldest deleted automatically).
+``fish prism-train`` defaults to ``--corpus latest`` and **never opens
+fish.db** for epochs (resume fingerprint binds to the ``.tcz`` ``corpus_id``).
+Freeze a new snapshot when labels change; ``--from-db`` freezes then trains;
+``--gpu`` is an alias for ``--device cuda``; ``--no-register`` skips the post-train
+DB write entirely.
+
+Each epoch also updates `models/checkpoints/{config}.progress.json` and prints a line:
+`epoch E/N  elapsed=…s  ep/s=…  holdout=…  best=…@epoch  device=…`
+(plus `@compute progress E N` on stderr for detached job tracking).
+
+Device: `--device auto|cpu|cuda|cuda:N` (default `auto` from config). Use `--device cuda`
+on a GPU box for a CPU-vs-GPU speed test; adapters are small so gains may be modest.
+
 Personal configs use **early stopping**: `epochs` is a ceiling (default 200);
 training stops when holdout Spearman fails to improve by `early_stop_min_delta`
 for `early_stop_patience` epochs (default 15 / 0.001). The best holdout weights
@@ -105,13 +121,17 @@ fish corpus collect --retriever legacy --min-queries 20 --top-k 10
 fish corpus inject-positives --query "Burning Man" \
   --like "%Interaction Café%,%Burn CREW%" --since 2026-01-01
 
-# 3. Label
+# 3. Label (no Fish write lock — safe beside prism-train epochs)
 fish corpus label --limit 400
 
-# 4. Train → registers model_id + writes binary .prz
+# 3b. Freeze labeled pairs → models/corpora/train_corpus_*.tcz
+fish corpus freeze-training --chunk-repr combined
+
+# 4. Train from frozen .tcz (default --corpus latest; epochs never touch fish.db)
 #    (resumable via models/checkpoints/{config}.pt; --fresh to restart)
 fish prism-train --config smoke_combined --overfit
-fish prism-train --config smoke_fields --overfit
+fish prism-train --config smoke_fields --overfit --from-db   # freeze header_body then train
+fish prism-train --config smoke_combined --overfit --gpu     # CUDA A/B vs CPU
 
 # 5. Embed a smoke slice (OpenAI once → SQLite raw + Qdrant legacy)
 fish embed --limit 100 --kinds email \

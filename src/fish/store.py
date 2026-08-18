@@ -217,14 +217,38 @@ def connect() -> sqlite3.Connection:
     return db
 
 
+def is_sqlite_locked(exc: BaseException) -> bool:
+    return isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
+
+
+def format_sqlite_locked_error(exc: BaseException) -> RuntimeError:
+    """Actionable error when SQLite busy_timeout is exhausted."""
+    from fish.write_lock import read_lock_status
+
+    status = read_lock_status()
+    if status.held:
+        holder = f"Fish write lock held by pid={status.pid} op={status.operation!r}"
+    else:
+        holder = (
+            "Fish write lock is free — another process may be writing "
+            "(label/embed/memory) or a long SQLite transaction is open"
+        )
+    return RuntimeError(
+        f"SQLite database is locked after busy_timeout ({exc}). {holder}. "
+        f"Retry shortly, or stop overlapping heavy writers (sync/import/reembed)."
+    )
+
+
 @contextmanager
 def db_conn() -> Iterator[sqlite3.Connection]:
     db = connect()
     try:
         yield db
         db.commit()
-    except Exception:
+    except Exception as exc:
         db.rollback()
+        if is_sqlite_locked(exc):
+            raise format_sqlite_locked_error(exc) from exc
         raise
     finally:
         db.close()
@@ -2237,6 +2261,51 @@ def update_sample_relevance(
         """,
         (target_relevance, agent_version, relevance_model, _utcnow(), sample_id),
     )
+
+
+def update_sample_relevance_with_retry(
+    sample_id: int,
+    *,
+    target_relevance: float,
+    agent_version: str,
+    relevance_model: str,
+    retries: int = 3,
+    delay_sec: float = 0.5,
+) -> None:
+    """Short retry for single-row label UPDATEs under concurrent writers."""
+    import time
+
+    last: BaseException | None = None
+    for attempt in range(retries):
+        try:
+            with db_conn() as db:
+                update_sample_relevance(
+                    db,
+                    sample_id,
+                    target_relevance=target_relevance,
+                    agent_version=agent_version,
+                    relevance_model=relevance_model,
+                )
+            return
+        except RuntimeError as exc:
+            # db_conn wraps OperationalError locked → RuntimeError
+            if "database is locked" not in str(exc).lower():
+                raise
+            last = exc
+            if attempt + 1 >= retries:
+                break
+            time.sleep(delay_sec * (attempt + 1))
+        except sqlite3.OperationalError as exc:
+            if not is_sqlite_locked(exc):
+                raise
+            last = exc
+            if attempt + 1 >= retries:
+                break
+            time.sleep(delay_sec * (attempt + 1))
+    assert last is not None
+    if isinstance(last, RuntimeError):
+        raise last
+    raise format_sqlite_locked_error(last)
 
 
 def training_corpus_stats(db: sqlite3.Connection) -> dict[str, Any]:

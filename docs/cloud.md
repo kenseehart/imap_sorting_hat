@@ -74,17 +74,27 @@ Options:
 
 ## Write lock
 
-Heavy writers acquire an exclusive lock at `{FISH_DB_PATH}.write.lock`:
+Heavy writers acquire an exclusive `fcntl.flock` at `{FISH_DB_PATH}.write.lock`.
+The kernel releases the flock when the holder exits — a dead process cannot leave
+it stuck. `fish write-lock-status` probes the flock (PID text is metadata only;
+cleared on unlock).
 
-| Operation | Lock name |
-|-----------|-----------|
-| `fish sync` | `sync` |
-| `fish import-corpus` | `import` |
-| `fish corpus collect/label/purge` | `corpus` |
-| `fish prism-train` | `train` |
-| `fish repair-headers` | `repair-headers` |
+| Operation | Lock name | Duration |
+|-----------|-----------|----------|
+| `fish sync` | `sync` | Whole sync |
+| `fish import-corpus` | `import` | Whole import |
+| `fish corpus collect` (sample insert) | `corpus` | Collect only — **not** labeling |
+| `fish corpus label` | *(none)* | Short SQLite UPDATEs; concurrent with train |
+| `fish corpus freeze-training` | `freeze-prep` / `freeze-training` | Field prep (if needed), then short snapshot lock |
+| `fish corpus purge` / inject / add-curated | `corpus` | Whole op |
+| `fish prism-train` | `train` only for post-train model register | Epochs load a `.tcz` — **no fish.db** |
+| `fish prism-reembed` / qdrant-* | `train` | Whole op |
+| `fish repair-headers` | `repair-headers` | Whole op |
 
-IMAP sync and PRISM training never run concurrently. MCP read tools (search) do not take the lock.
+IMAP sync and corpus freeze never run concurrently. Epoch training does not hold
+the Fish lock and does not open fish.db (unless `--from-db` / `--collect-first`
+freezes first). SQLite uses WAL + 30s `busy_timeout`; label UPDATEs retry a few
+times on lock contention.
 
 ```bash
 fish write-lock-status

@@ -97,6 +97,7 @@ def get_prism_config(config_name: str) -> dict[str, Any]:
     # 0 = train all epochs; >0 = stop when holdout Spearman stalls this many epochs
     cfg.setdefault("early_stop_patience", 0)
     cfg.setdefault("early_stop_min_delta", 0.0)
+    cfg.setdefault("device", "auto")  # auto | cpu | cuda | cuda:N
     chunk_repr = str(cfg["chunk_repr"])
     if chunk_repr not in ("combined", "header_body"):
         raise ValueError(

@@ -15,7 +15,7 @@ from fish.store import (
     get_training_query,
     init_db,
     list_unlabeled_samples,
-    update_sample_relevance,
+    update_sample_relevance_with_retry,
 )
 
 RELEVANCE_AGENT_VERSION = "2.0.0"
@@ -130,14 +130,12 @@ def _score_and_store(job: dict[str, Any], *, client: OpenAI) -> float:
         client=client,
     )
     with _db_write_lock:
-        with db_conn() as db:
-            update_sample_relevance(
-                db,
-                int(job["sample_id"]),
-                target_relevance=rel,
-                agent_version=RELEVANCE_AGENT_VERSION,
-                relevance_model=relevance_model(),
-            )
+        update_sample_relevance_with_retry(
+            int(job["sample_id"]),
+            target_relevance=rel,
+            agent_version=RELEVANCE_AGENT_VERSION,
+            relevance_model=relevance_model(),
+        )
     return rel
 
 

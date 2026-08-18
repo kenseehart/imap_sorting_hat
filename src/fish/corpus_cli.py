@@ -60,9 +60,12 @@ def collect(
                 min_queries=min_queries,
                 synthesis_batch=synthesis_batch,
                 top_k=top_k,
-                label=label,
+                label=False,
                 label_limit=label_limit,
             )
+        # RelevanceAgent waits must not hold the Fish write lock.
+        if label:
+            result["labeling"] = label_batch(limit=label_limit)
     except Exception as exc:
         print(exc, file=sys.stderr)
         return 1
@@ -107,6 +110,47 @@ def label(
         print(exc, file=sys.stderr)
         return 1
     emit_output(result, json_output=json_output, md=md_output, title="Fish corpus label")
+    return 0
+
+
+@corpus.cmd(output=True)
+def freeze_training(
+    chunk_repr: str = optarg(
+        "combined",
+        long_flag="--chunk-repr",
+        help="combined | header_body (must match the PRISM config you will train)",
+    ),
+    retriever: str | None = optarg(
+        None,
+        long_flag="--retriever",
+        help="Only include samples from this retriever (default: all labeled)",
+    ),
+    no_prep_fields: bool = optarg(
+        False,
+        long_flag="--no-prep-fields",
+        action="store_true",
+        help="Skip header/body field embed prep before freeze (header_body only)",
+    ),
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """Snapshot labeled pairs + embeddings → models/corpora/train_corpus_{ts}.tcz."""
+    from fish.prism.train_corpus import freeze_training_corpus
+
+    load_env()
+    try:
+        result = freeze_training_corpus(
+            chunk_repr=chunk_repr,
+            retriever=retriever,
+            prep_fields=not no_prep_fields,
+        )
+    except Exception as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    emit_output(
+        result, json_output=json_output, md=md_output, title="Fish corpus freeze-training"
+    )
     return 0
 
 

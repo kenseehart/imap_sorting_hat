@@ -33,7 +33,7 @@ Binary zip `.prz`. See [`docs/prism.md`](docs/prism.md).
 - **MCP (remote)**: `https://mcp.seehart.com/fish/mcp` (Claude.ai connector)
 - **MCP (local dev)**: `python -m fish.mcp_server` — optional; reads local db unless `FISH_DB_PATH` set
 - **Training**: RelevanceAgent labels → `fish prism-train` (MSE) → `.prz`; then `fish prism-reembed` (from stored raw, no OpenAI) — see [`docs/prism.md`](docs/prism.md), [`docs/cloud.md`](docs/cloud.md)
-- **Write lock**: exclusive lock for sync / import / corpus / train — `fish write-lock-status`
+- **Write lock**: exclusive flock for sync / import / corpus collect / freeze / train register (not epochs or `corpus label`) — `fish write-lock-status`
 
 ## Training corpus
 
@@ -67,8 +67,9 @@ fish search "some query" --since 2026-07-16   # logs real query; adapted cos if 
 fish corpus collect --retriever legacy --min-queries 50 --top-k 20
 fish corpus inject-positives --query "…" --like "%pattern%"   # cold-start hard positives
 fish corpus label --limit 500           # RelevanceAgent → target_relevance
+fish corpus freeze-training --chunk-repr combined  # → models/corpora/train_corpus_*.tcz
 fish corpus stats
-fish prism-train                        # MSE; resumable checkpoints under models/checkpoints/
+fish prism-train                        # MSE from --corpus latest; checkpoints under models/checkpoints/
 fish prism-reembed --limit 200           # re-index ANN from raw (smoke); no OpenAI
 fish prism-reembed                       # full re-index from raw_embedding
 ```
@@ -102,13 +103,14 @@ fish connect <email>
 | `fish embedding-get <id>` | Stored embedding vector for a corpus item |
 | `fish embed` | Embed pending combined vectors (SQLite + Qdrant); also embeds header/body into SQLite |
 | `fish embed --fields` | Backfill `header_json` + header/body raw embeddings in SQLite only (no Qdrant) |
-| `fish prism-train` | Train PRISM adapters (MSE vs RelevanceAgent) → `{config}.{timestamp}.prz`; `--overfit` for smoke |
+| `fish prism-train` | Train from frozen `.tcz` (`--corpus latest`) → `{config}.{timestamp}.prz`; `--from-db` freezes first; `--gpu` / `--overfit` |
 | `fish prism-reembed` | Rewrite PRISM Qdrant collection from raw (streamed, skips existing; `--force` rewrites); `--limit` / `--like` / `--since` for smoke |
 | `fish qdrant-migrate` | One-shot: copy sqlite-vec → `corpus_raw_embeddings` + upsert legacy Qdrant collection |
 | `fish qdrant-reindex` | Upsert `corpus_raw_embeddings` into legacy Qdrant (skips existing ids; `--force` rewrites) |
 | `fish corpus collect` | `--retriever legacy\|personal`, synthesize queries, top-k samples |
 | `fish corpus inject-positives` | Force (query, doc) pairs into training set (cold-start) |
 | `fish corpus label` | RelevanceAgent labels (`target_relevance`) |
+| `fish corpus freeze-training` | Snapshot labeled embeds → `models/corpora/train_corpus_{ts}.tcz` |
 | `fish corpus stats` | Query/sample counts |
 | `fish corpus queries` | Dump training queries (`--origin gold\|curated\|synth`, `--source`, `--json`) |
 | `fish corpus add-curated` | Load `config/gold_queries.jsonl` as `origin=curated` (`add-gold` alias) |

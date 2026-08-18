@@ -162,6 +162,9 @@ def collect_samples(
         "samples_created": samples_created,
         "samples_updated": samples_updated,
     }
+    # Labeling must run outside fish_write_lock (OpenAI waits). Callers that
+    # hold the corpus/train lock should pass label=False and invoke label_batch
+    # after releasing the lock.
     if label:
         result["labeling"] = label_batch(limit=label_limit)
     return result
