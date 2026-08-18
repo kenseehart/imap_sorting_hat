@@ -1,11 +1,18 @@
-resource: daime-prism
+# Default resource for sync / compute run when using ``.`` from this repo.
+# Use-case routing (workloads) is separate from hardware inventory names.
+resource: runpod-l4
 repo: ~/ws/fish
 sync_paths:
   - models/
 
-# Canonical fish.db lives on mcp-services at /data/fish/fish.db.
-# Before PRISM training on RunPod:
-#   compute sync mcp-services pull fish.db
-#   FISH_DB_PATH=~/.config/fish/fish.db FISH_DATA_DIR=~/.config/fish fish prism-train
-# After training:
-#   compute sync mcp-services push models/personal.prz
+workloads:
+  train: runpod-l4
+  label: runpod-cpu32
+  freeze: runpod-cpu32
+
+# Canonical fish.db lives on gcp-e2-mcp (GCP VM mcp-services) at /data/fish/fish.db.
+# Heavy label/freeze/train: RunPod workers — not the MCP host.
+#   compute up runpod-cpu32   # or runpod-l4 for --gpu train
+#   compute sync gcp-e2-mcp pull fish.db
+#   compute sync runpod-l4 push models/   # after train
+#   compute down runpod-l4

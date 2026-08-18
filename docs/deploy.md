@@ -1,6 +1,6 @@
 # Remote MCP deploy (Claude mobile)
 
-**Production corpus** lives on GCP `mcp-services` — see [`docs/cloud.md`](cloud.md).
+**Production corpus** lives on GCP `gcp-e2-mcp` — see [`docs/cloud.md`](cloud.md).
 
 ```bash
 sitehost setup-fish-cloud
@@ -17,20 +17,20 @@ Registered at [claude.ai/customize/connectors](https://claude.ai/customize/conne
 
 ## PRISM training (RunPod)
 
-**Training** uses `compute` — see `fish/compute.yaml` (`daime-prism` pod: L4, 86 GB RAM, ~$0.39/hr).
+**Training** uses `compute` — see `fish/compute.yaml` (`runpod-l4`: L4, 86 GB RAM, ~$0.39/hr; label/freeze on `runpod-cpu32`).
 
 Pull a snapshot of the cloud db before training:
 
 ```bash
-compute sync mcp-services pull fish.db
+compute sync gcp-e2-mcp pull fish.db
 FISH_DB_PATH=~/.config/fish/fish.db fish prism-train
-compute sync mcp-services push models/personal.prz
+compute sync gcp-e2-mcp push models/personal.prz
 ```
 
 Bind the live pod after IP/port changes (RunPod console → **SSH over exposed TCP**):
 
 ```bash
-compute bind daime-prism --ssh root@66.92.198.138:11405 \
+compute bind runpod-l4 --ssh root@HOST:PORT \
   --proxy-user lutibaqqa6gnbi-64411dc8 --identity ~/.ssh/id_ed25519_personal
-compute ssh daime-prism
+compute ssh runpod-l4
 ```

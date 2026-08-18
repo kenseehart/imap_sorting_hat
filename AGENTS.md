@@ -22,12 +22,12 @@ Storage: SQLite **`fish.db`** (documents + durable raw embeds: combined / header
 (`retrieval_models`: **`legacy` → `fish_legacy`**; **`{config}.{timestamp}` → `fish_{…}`**).
 Binary zip `.prz`. See [`docs/prism.md`](docs/prism.md).
 
-**Production corpus:** canonical db on GCP `mcp-services` at `/data/fish/fish.db` (PD `fish-data`). See [`docs/cloud.md`](docs/cloud.md).
+**Production corpus:** canonical db on GCP **`gcp-e2-mcp`** (VM `mcp-services`) at `/data/fish/fish.db` (PD `fish-data`). See [`docs/cloud.md`](docs/cloud.md). Heavy train/label/freeze: RunPod per [`compute.yaml`](compute.yaml) — not the MCP host.
 
 ## Architecture
 
 - **Identity**: `{source_id}.{message_id}` as `corpus_items.source_key` (UNIQUE); integer PK is surrogate for Qdrant/training only — see [`docs/identity.md`](docs/identity.md)
-- **Sync**: `imapclient` → `messages` + mirrored `corpus_items` (kind=email) — **cloud cron on mcp-services**
+- **Sync**: `imapclient` → `messages` + mirrored `corpus_items` (kind=email) — **cloud cron on gcp-e2-mcp**
 - **Import**: `fish import-corpus` — SMS, ChatGPT, Claude — see [`docs/import-runbook.md`](docs/import-runbook.md)
 - **Search**: Qdrant ANN (raw or PRISM-adapted); metadata filters applied **in** the vector query (`--since`, `--until`, `--from`, `--account`, …). No keyword hybrid ranking (deferred).
 - **MCP (remote)**: `https://mcp.seehart.com/fish/mcp` (Claude.ai connector)
@@ -136,7 +136,7 @@ Write: `fish_sync_run`, `fish_message_move`, `fish_message_archive`, `fish_bulk_
 | `~/.config/fish/accounts.yaml` | IMAP/SMTP accounts |
 | `~/.config/fish/fish.env` | `OPENAI_API_KEY`, `FISH_QDRANT_URL`, optional `FISH_PRISM_MODEL`, `FISH_DATA_DIR`, `FISH_DB_PATH` |
 | `fish.db` | Corpus + IMAP state + raw embeddings — **cloud:** `/data/fish/fish.db`; **local dev:** `~/.config/fish/fish.db` |
-| Qdrant | ANN indexes — **cloud:** Docker on `mcp-services` (`FISH_QDRANT_URL=http://127.0.0.1:6333`) |
+| Qdrant | ANN indexes — **cloud:** Docker on `gcp-e2-mcp` (`FISH_QDRANT_URL=http://127.0.0.1:6333`) |
 | `models/` | PRISM `.prz` files — **cloud:** `/data/fish/models/` |
 | `~/.config/fish/context_rules.yaml` | Context-based retrieval boosts |
 | `imports/` | Drop zone for export files — **cloud:** `/data/fish/imports/` |
