@@ -74,7 +74,7 @@ fish prism-reembed --limit 200           # re-index ANN from raw (smoke); no Ope
 fish prism-reembed                       # full re-index from raw_embedding
 ```
 
-`header_body` configs auto-prep field embeds for **labeled training items only** before train (not full corpus). Full corpus: `fish embed --fields`.
+`split` configs auto-prep field embeds for **labeled training items only** before train (not full corpus). Full corpus: `fish embed --fields`.
 
 Compare retrievers by collecting with `--retriever legacy` vs `--retriever personal` (separate runs).
 
@@ -151,3 +151,14 @@ FISH_PRISM_MODEL=personal.prz
 ```
 
 Heavy training: RunPod per [`compute.yaml`](compute.yaml), [`docs/cloud.md`](docs/cloud.md), and [`docs/deploy.md`](docs/deploy.md).
+
+## Task progress (shared)
+
+Label / freeze / train report into compute’s task store (`TaskProgress`). Poll on MCP:
+
+```bash
+compute tasks --module fish
+# HTML UI (on MCP): http://127.0.0.1:8765/tasks/ui
+```
+
+Remote workers: set `COMPUTE_TASKS_URL` (+ `COMPUTE_TASKS_TOKEN`) to the MCP tasks API. Soft cancel: `compute tasks cancel <id>` (worker notices on next tick). See [`../compute/AGENTS.md`](../compute/AGENTS.md).

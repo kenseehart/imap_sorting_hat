@@ -15,8 +15,8 @@ import numpy as np
 from fish.config import EMBED_DIM, embedding_model, models_dir
 from fish.prism.inference import cosine_similarity, compose_chunk_vector
 from fish.prism.model import (
-    CHUNK_REPR_COMBINED,
-    CHUNK_REPR_HEADER_BODY,
+    CHUNK_REPR_JOINT,
+    CHUNK_REPR_SPLIT,
     SCORING_COSINE,
     SCORING_MLP_HEAD,
     PrismAdapter,
@@ -84,7 +84,7 @@ def load_training_pairs_from_db(
     *,
     exclude_superseded: bool = True,
     retriever: str | None = None,
-    chunk_repr: str = CHUNK_REPR_COMBINED,
+    chunk_repr: str = CHUNK_REPR_JOINT,
 ) -> list[TrainingPair]:
     init_db()
     with db_conn() as db:
@@ -101,7 +101,7 @@ def load_training_pairs_from_db(
                 continue
             q_emb = np.asarray(q_emb, dtype=np.float32).reshape(-1)
             item_id = int(row["corpus_item_id"])
-            if chunk_repr == CHUNK_REPR_COMBINED:
+            if chunk_repr == CHUNK_REPR_JOINT:
                 c_emb = row.get("message_embedding")
                 if not isinstance(c_emb, np.ndarray) or c_emb.size == 0:
                     c_emb = get_raw_embedding(db, item_id)
@@ -127,13 +127,98 @@ def load_training_pairs_from_db(
                     ),
                 )
             )
-    if chunk_repr == CHUNK_REPR_HEADER_BODY and not pairs and missing_fields:
+    if chunk_repr == CHUNK_REPR_SPLIT and not pairs and missing_fields:
         raise RuntimeError(
-            f"chunk_repr=header_body but no pairs have header+body embeddings "
+            f"chunk_repr=split but no pairs have split (header+body) embeddings "
             f"({missing_fields} labeled rows missing fields). "
             f"Run: fish embed --fields --training-only"
         )
     return pairs
+
+
+def load_dual_training_arrays_from_db(
+    *,
+    exclude_superseded: bool = True,
+    retriever: str | None = None,
+) -> dict[str, Any]:
+    """Aligned arrays for a dual-repr freeze (joint + split).
+
+    Only includes labeled pairs that have both chunk representations so bakeoff
+    models train on the exact same (query, doc, relevance) rows.
+    """
+    init_db()
+    queries: list[str] = []
+    chunk_ids: list[int] = []
+    relevance: list[float] = []
+    retrieval: list[float] = []
+    q_rows: list[np.ndarray] = []
+    c_joint: list[np.ndarray] = []
+    c_split_rows: list[np.ndarray] = []
+    missing_joint = 0
+    missing_split = 0
+    with db_conn() as db:
+        rows = load_labeled_training_pairs(
+            db,
+            exclude_superseded=exclude_superseded,
+            retriever=retriever,
+        )
+        for row in rows:
+            q_emb = row.get("query_embedding")
+            if not isinstance(q_emb, np.ndarray) or q_emb.size == 0:
+                continue
+            q_emb = np.asarray(q_emb, dtype=np.float32).reshape(-1)
+            item_id = int(row["corpus_item_id"])
+            c_comb = row.get("message_embedding")
+            if not isinstance(c_comb, np.ndarray) or c_comb.size == 0:
+                c_comb = get_raw_embedding(db, item_id)
+            if not isinstance(c_comb, np.ndarray) or c_comb.size == 0:
+                missing_joint += 1
+                continue
+            c_comb = np.asarray(c_comb, dtype=np.float32).reshape(-1)
+            c_split = compose_chunk_vector(db, item_id, CHUNK_REPR_SPLIT)
+            if c_split is None:
+                missing_split += 1
+                continue
+            c_split = np.asarray(c_split, dtype=np.float32).reshape(-1)
+            queries.append(str(row["query_text"]))
+            chunk_ids.append(item_id)
+            relevance.append(float(row["target_relevance"]))
+            retrieval.append(
+                float(row["retrieval_similarity"])
+                if row.get("retrieval_similarity") is not None
+                else 0.0
+            )
+            q_rows.append(q_emb)
+            c_joint.append(c_comb)
+            c_split_rows.append(c_split)
+
+    n = len(queries)
+    if n == 0:
+        return {
+            "n_pairs": 0,
+            "missing_joint": missing_joint,
+            "missing_split": missing_split,
+            "queries": [],
+            "chunk_ids": [],
+            "relevance": [],
+            "retrieval_similarity": [],
+            "q": np.zeros((0, 0), dtype=np.float32),
+            "c_by_repr": {},
+        }
+    return {
+        "n_pairs": n,
+        "missing_joint": missing_joint,
+        "missing_split": missing_split,
+        "queries": queries,
+        "chunk_ids": chunk_ids,
+        "relevance": relevance,
+        "retrieval_similarity": retrieval,
+        "q": np.stack(q_rows).astype(np.float32, copy=False),
+        "c_by_repr": {
+            CHUNK_REPR_JOINT: np.stack(c_joint).astype(np.float32, copy=False),
+            CHUNK_REPR_SPLIT: np.stack(c_split_rows).astype(np.float32, copy=False),
+        },
+    }
 
 
 def split_pairs(
@@ -175,7 +260,7 @@ def evaluate_model(model: PrismModel, pairs: list[TrainingPair]) -> dict[str, fl
         if q is None or c is None:
             continue
         labels.append(pair.relevance)
-        # Raw cosine only defined when dims match (combined). For header_body,
+        # Raw cosine only defined when dims match (joint). For split,
         # compare query to mean of h/b halves as a crude baseline.
         q_arr = np.asarray(q, dtype=np.float32).reshape(-1)
         c_arr = np.asarray(c, dtype=np.float32).reshape(-1)
@@ -217,10 +302,18 @@ def _train_fingerprint(
     chunk_repr: str,
     adapter_sharing: str,
     scoring: str = SCORING_COSINE,
+    hidden_dim: int = 1536,
 ) -> str:
     """Stable id so resume fails loud if the frozen corpus or config changed."""
     h = hashlib.sha256()
-    for part in (corpus_id, config_name, chunk_repr, adapter_sharing, scoring):
+    for part in (
+        corpus_id,
+        config_name,
+        chunk_repr,
+        adapter_sharing,
+        scoring,
+        str(int(hidden_dim)),
+    ):
         h.update(part.encode())
         h.update(b"\0")
     return h.hexdigest()
@@ -229,8 +322,9 @@ def _train_fingerprint(
 def ensure_training_field_embeddings() -> dict[str, int]:
     """header_json + OpenAI field embeds for labeled training items only.
 
-    Used before header_body training so smoke/personal_fields do not trigger a
-    full-corpus field backfill.
+    Used before split training so split configs do not trigger a
+    full-corpus field backfill. Takes short write locks per batch — does not
+    hold the exclusive lock across OpenAI round-trips.
     """
     from fish.store import (
         backfill_corpus_header_json,
@@ -238,13 +332,17 @@ def ensure_training_field_embeddings() -> dict[str, int]:
         db_conn,
     )
     from fish.sync import embed_field_pending
+    from fish.write_lock import fish_write_lock
 
     init_db()
-    with db_conn() as db:
-        headers = backfill_corpus_header_json(db, training_only=True)
-        need = count_corpus_needing_field_embeddings(db, training_only=True)
+    with fish_write_lock("freeze-prep"):
+        with db_conn() as db:
+            headers = backfill_corpus_header_json(db, training_only=True)
+            need = count_corpus_needing_field_embeddings(db, training_only=True)
     done = 0
     while True:
+        # embed_field_pending does its own short lock around DB write; OpenAI
+        # waits outside the exclusive flock (see sync.embed_field_pending).
         n = embed_field_pending(batch_size=50, training_only=True)
         if n == 0:
             break
@@ -259,7 +357,7 @@ def ensure_training_field_embeddings() -> dict[str, int]:
 def train_prism_model(
     pairs: list[TrainingPair],
     *,
-    config_name: str = "smoke_combined",
+    config_name: str = "smoke_joint",
     corpus_id: str,
     epochs: int | None = None,
     lr: float | None = None,
@@ -312,14 +410,15 @@ def train_prism_model(
         else cfg["early_stop_min_delta"]
     )
     dim = int(cfg.get("embed_dim") or EMBED_DIM)
+    hidden_dim = int(cfg.get("hidden_dim") or dim)
     chunk_repr = str(cfg["chunk_repr"])
     adapter_sharing = str(cfg["adapter_sharing"])
     scoring = str(cfg.get("scoring") or SCORING_COSINE)
-    head_hidden = int(cfg.get("head_hidden") or 512)
-    chunk_in = dim * 2 if chunk_repr == CHUNK_REPR_HEADER_BODY else dim
+    head_hidden = int(cfg.get("head_hidden") or hidden_dim)
+    chunk_in = dim * 2 if chunk_repr == CHUNK_REPR_SPLIT else dim
     if adapter_sharing == "siamese" and chunk_in != dim:
         raise ValueError(
-            "siamese adapter_sharing requires chunk_repr=combined "
+            "siamese adapter_sharing requires chunk_repr=joint "
             f"(chunk_in={chunk_in} != dim={dim})"
         )
     # Early stop needs a holdout set; overfit (eval==train) still works but
@@ -338,14 +437,15 @@ def train_prism_model(
         chunk_repr=chunk_repr,
         adapter_sharing=adapter_sharing,
         scoring=scoring,
+        hidden_dim=hidden_dim,
     )
 
     class Adapter(nn.Module):
-        def __init__(self, in_dim: int, out_dim: int) -> None:
+        def __init__(self, in_dim: int, hidden: int, out_dim: int) -> None:
             super().__init__()
-            self.w1 = nn.Linear(in_dim, out_dim)
-            self.ln = nn.LayerNorm(out_dim)
-            self.w2 = nn.Linear(out_dim, out_dim)
+            self.w1 = nn.Linear(in_dim, hidden)
+            self.ln = nn.LayerNorm(hidden)
+            self.w2 = nn.Linear(hidden, out_dim)
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
             h = torch.nn.functional.gelu(self.ln(self.w1(x)))
@@ -361,12 +461,12 @@ def train_prism_model(
             h = torch.nn.functional.gelu(self.w1(x))
             return torch.sigmoid(self.w2(h)).squeeze(-1)
 
-    q_adapter = Adapter(dim, dim)
+    q_adapter = Adapter(dim, hidden_dim, dim)
     if adapter_sharing == "siamese":
         c_adapter = q_adapter
         opt_params = list(q_adapter.parameters())
     else:
-        c_adapter = Adapter(chunk_in, dim)
+        c_adapter = Adapter(chunk_in, hidden_dim, dim)
         opt_params = list(q_adapter.parameters()) + list(c_adapter.parameters())
     head: Head | None = None
     if scoring == SCORING_MLP_HEAD:
@@ -479,6 +579,28 @@ def train_prism_model(
     indices = list(range(n))
     every = max(1, int(checkpoint_every))
 
+    # Holdout tensors on device (full set fits easily; ~MB for personal corpora).
+    hq_mats: list[np.ndarray] = []
+    hc_mats: list[np.ndarray] = []
+    hrel_rows: list[float] = []
+    for pair in holdout:
+        if pair.query_embedding is None or pair.chunk_embedding is None:
+            continue
+        hq_mats.append(np.asarray(pair.query_embedding, dtype=np.float32).reshape(-1))
+        hc_mats.append(np.asarray(pair.chunk_embedding, dtype=np.float32).reshape(-1))
+        hrel_rows.append(float(pair.relevance))
+    if hq_mats:
+        hq_all = torch.from_numpy(np.stack(hq_mats).astype(np.float32, copy=False)).to(
+            torch_device
+        )
+        hc_all = torch.from_numpy(np.stack(hc_mats).astype(np.float32, copy=False)).to(
+            torch_device
+        )
+        hrel_np = np.asarray(hrel_rows, dtype=np.float32)
+    else:
+        hq_all = hc_all = None
+        hrel_np = np.asarray([], dtype=np.float32)
+
     def export_adapter(module: Adapter) -> PrismAdapter:
         return PrismAdapter(
             w1=module.w1.weight.detach().cpu().numpy(),
@@ -512,23 +634,39 @@ def train_prism_model(
             else None
         )
 
-    def export_snap() -> PrismModel:
-        shared = export_adapter(q_adapter)
-        return PrismModel(
-            query_adapter=shared,
-            chunk_adapter=(
-                shared if adapter_sharing == "siamese" else export_adapter(c_adapter)
-            ),
-            embed_dim=dim,
-            embed_model=embedding_model(),
-            chunk_repr=chunk_repr,
-            adapter_sharing=adapter_sharing,
-            scoring=scoring,
-            rerank_head=export_head(head) if head is not None else None,
-        )
-
     def holdout_spearman() -> float:
-        return float(evaluate_model(export_snap(), holdout)["spearman_prism"])
+        """Batched GPU eval — avoids per-epoch CPU export_snap + Python pair loop."""
+        if hq_all is None or hc_all is None or hrel_np.size == 0:
+            return 0.0
+        was_training = q_adapter.training
+        q_adapter.eval()
+        if adapter_sharing != "siamese":
+            c_adapter.eval()
+        if head is not None:
+            head.eval()
+        scores: list[float] = []
+        with torch.no_grad():
+            hn = int(hq_all.shape[0])
+            for start in range(0, hn, batch_size):
+                q = hq_all[start : start + batch_size]
+                c = hc_all[start : start + batch_size]
+                q_out = q_adapter(q)
+                c_out = c_adapter(c)
+                if scoring == SCORING_MLP_HEAD:
+                    assert head is not None
+                    score = head(torch.cat([q_out, c_out], dim=-1))
+                else:
+                    q_norm = torch.nn.functional.normalize(q_out, dim=-1)
+                    c_norm = torch.nn.functional.normalize(c_out, dim=-1)
+                    score = (q_norm * c_norm).sum(dim=-1)
+                scores.extend(float(x) for x in score.detach().cpu().tolist())
+        if was_training:
+            q_adapter.train()
+            if adapter_sharing != "siamese":
+                c_adapter.train()
+            if head is not None:
+                head.train()
+        return float(_spearman(scores, [float(x) for x in hrel_np.tolist()]))
 
     def write_checkpoint(epoch_done: int) -> None:
         ckpt_path.parent.mkdir(parents=True, exist_ok=True)
@@ -549,6 +687,7 @@ def train_prism_model(
             "adapter_sharing": adapter_sharing,
             "scoring": scoring,
             "embed_dim": dim,
+            "hidden_dim": hidden_dim,
             "pairs_fingerprint": pairs_fp,
             "corpus_id": corpus_id,
             "q_adapter": q_cpu,
@@ -580,6 +719,7 @@ def train_prism_model(
         elapsed_sec: float,
         holdout: float,
         status: str = "running",
+        task_progress: Any | None = None,
     ) -> dict[str, Any]:
         epochs_done = max(0, epoch_done - start_epoch)
         ep_per_sec = (epochs_done / elapsed_sec) if elapsed_sec > 0 else 0.0
@@ -617,6 +757,21 @@ def train_prism_model(
         print(line, flush=True)
         print(line, file=sys.stderr, flush=True)
         print(f"@compute progress {epoch_done} {epochs}", file=sys.stderr, flush=True)
+        if task_progress is not None:
+            from compute.tasks import TaskCancelled
+
+            try:
+                task_progress.update(
+                    epoch_done,
+                    n=epochs,
+                    detail=(
+                        f"{config_name} {torch_device} "
+                        f"epoch {epoch_done}/{epochs} holdout={holdout:.4f}"
+                    ),
+                    force=True,
+                )
+            except TaskCancelled:
+                raise
         return payload
 
     print(
@@ -626,48 +781,84 @@ def train_prism_model(
         flush=True,
     )
 
+    import os as _os
+
+    from compute.tasks import TaskCancelled, TaskProgress
+
     stopped_early = False
+    cancelled = False
     epochs_run = start_epoch
     history: list[dict[str, float | int]] = []
     train_t0 = time.monotonic()
-    for epoch in range(start_epoch, epochs):
-        random.shuffle(indices)
-        for start in range(0, n, batch_size):
-            batch_idx = indices[start : start + batch_size]
-            q = q_all[batch_idx]
-            c = c_all[batch_idx]
-            rel = rel_all[batch_idx]
-            opt.zero_grad()
-            q_out = q_adapter(q)
-            c_out = c_adapter(c)
-            if scoring == SCORING_MLP_HEAD:
-                assert head is not None
-                score = head(torch.cat([q_out, c_out], dim=-1))
-            else:
-                q_norm = torch.nn.functional.normalize(q_out, dim=-1)
-                c_norm = torch.nn.functional.normalize(c_out, dim=-1)
-                score = (q_norm * c_norm).sum(dim=-1)
-            loss = loss_fn(score, rel)
-            loss.backward()
-            opt.step()
-        epochs_run = epoch + 1
-        spear = holdout_spearman()
-        history.append({"epoch": epochs_run, "spearman_holdout": spear})
-        improved = spear > best_holdout + min_delta
-        if improved:
-            best_holdout = spear
-            best_epoch = epochs_run
-            stall_epochs = 0
-            snapshot_best()
-        else:
-            stall_epochs += 1
-        elapsed = time.monotonic() - train_t0
-        write_progress(epoch_done=epochs_run, elapsed_sec=elapsed, holdout=spear)
-        if (epoch + 1) % every == 0 or epoch + 1 == epochs:
-            write_checkpoint(epoch)
-        if use_early_stop and stall_epochs >= patience:
+    device_tag = "gpu" if torch_device.type == "cuda" else "cpu"
+    with TaskProgress(
+        module="fish",
+        task=f"train:{config_name}:{device_tag}",
+        n=epochs,
+        sec_per_unit_prior=None,
+        detail=f"{config_name} {torch_device} starting ({n} pairs)",
+        resource=_os.environ.get("COMPUTE_RESOURCE"),
+        meta={
+            "config_name": config_name,
+            "corpus_id": corpus_id,
+            "device": str(torch_device),
+            "gpu": torch_device.type == "cuda",
+            "n_pairs": n,
+        },
+        emit_stderr_progress=False,
+    ) as task_progress:
+        try:
+            for epoch in range(start_epoch, epochs):
+                random.shuffle(indices)
+                for start in range(0, n, batch_size):
+                    batch_idx = indices[start : start + batch_size]
+                    q = q_all[batch_idx]
+                    c = c_all[batch_idx]
+                    rel = rel_all[batch_idx]
+                    opt.zero_grad()
+                    q_out = q_adapter(q)
+                    c_out = c_adapter(c)
+                    if scoring == SCORING_MLP_HEAD:
+                        assert head is not None
+                        score = head(torch.cat([q_out, c_out], dim=-1))
+                    else:
+                        q_norm = torch.nn.functional.normalize(q_out, dim=-1)
+                        c_norm = torch.nn.functional.normalize(c_out, dim=-1)
+                        score = (q_norm * c_norm).sum(dim=-1)
+                    loss = loss_fn(score, rel)
+                    loss.backward()
+                    opt.step()
+                epochs_run = epoch + 1
+                spear = holdout_spearman()
+                history.append({"epoch": epochs_run, "spearman_holdout": spear})
+                improved = spear > best_holdout + min_delta
+                if improved:
+                    best_holdout = spear
+                    best_epoch = epochs_run
+                    stall_epochs = 0
+                    snapshot_best()
+                else:
+                    stall_epochs += 1
+                elapsed = time.monotonic() - train_t0
+                write_progress(
+                    epoch_done=epochs_run,
+                    elapsed_sec=elapsed,
+                    holdout=spear,
+                    task_progress=task_progress,
+                )
+                if (epoch + 1) % every == 0 or epoch + 1 == epochs:
+                    write_checkpoint(epoch)
+                if use_early_stop and stall_epochs >= patience:
+                    stopped_early = True
+                    break
+        except TaskCancelled:
+            cancelled = True
             stopped_early = True
-            break
+
+    if cancelled:
+        raise TaskCancelled(
+            f"prism-train {config_name} cancelled after epoch {epochs_run}/{epochs}"
+        )
 
     if best_q_state is not None:
         q_adapter.load_state_dict(best_q_state)
@@ -679,6 +870,7 @@ def train_prism_model(
             head.load_state_dict(best_head_state)
             head = head.to(torch_device)
 
+    print(f"prism-train {config_name}: exporting adapters…", flush=True)
     shared = export_adapter(q_adapter)
     model = PrismModel(
         query_adapter=shared,
@@ -693,9 +885,23 @@ def train_prism_model(
         scoring=scoring,
         rerank_head=export_head(head) if head is not None else None,
     )
-    metrics = evaluate_model(model, holdout)
+    # Prefer batched GPU holdout already tracked during train — avoid slow
+    # per-pair numpy evaluate_model (hangs for minutes on large adapters).
+    print(f"prism-train {config_name}: final holdout via GPU batch…", flush=True)
+    final_holdout = float(holdout_spearman())
+    metrics = {
+        "spearman_raw": 0.0,
+        "spearman_prism": final_holdout,
+        "count": float(len(holdout)),
+    }
     out = output or models_dir() / f"{model_id}.prz"
-    save_prz(model, out)
+    tmp_out = Path("/tmp") / f"{model_id}.prz"
+    print(f"prism-train {config_name}: saving {tmp_out}…", flush=True)
+    save_prz(model, tmp_out)
+    print(f"prism-train {config_name}: copying to {out}…", flush=True)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(tmp_out.read_bytes())
+    print(f"prism-train {config_name}: saved {out} ({out.stat().st_size} bytes)", flush=True)
     if ckpt_path.is_file():
         ckpt_path.unlink()
     final_elapsed = time.monotonic() - train_t0
@@ -711,6 +917,8 @@ def train_prism_model(
     metrics["chunk_repr"] = chunk_repr
     metrics["adapter_sharing"] = adapter_sharing
     metrics["scoring"] = scoring
+    metrics["hidden_dim"] = hidden_dim
+    metrics["head_hidden"] = head_hidden
     metrics["device"] = str(torch_device)
     metrics["epochs"] = epochs
     metrics["epochs_run"] = epochs_run
@@ -751,7 +959,7 @@ def train_prism_model(
 
 def train_from_corpus(
     *,
-    config_name: str = "smoke_combined",
+    config_name: str | list[str] = "smoke_joint",
     epochs: int | None = None,
     output: Path | None = None,
     retriever: str | None = None,
@@ -768,23 +976,30 @@ def train_from_corpus(
     from_db: bool = False,
     register: bool = True,
 ) -> dict[str, Any]:
-    """Train adapters from a frozen ``.tcz`` (default ``--corpus latest``).
+    """Train one or more adapter configs from frozen ``.tcz`` file(s).
 
-    Epochs never open fish.db. Use ``--from-db`` (or ``--collect-first``) to freeze
-    a new corpus from SQLite first. Model register is a short post-train DB write.
+    Multiple configs (list or comma-expanded via CLI) share one loaded corpus per
+    ``chunk_repr`` so embeddings stay resident while iterating models.
+    Epochs never open fish.db. Use ``--from-db`` / ``--collect-first`` to freeze.
     """
-    from fish.prism.configs import get_prism_config
+    from fish.prism.configs import get_prism_config, parse_config_list
     from fish.prism.train_corpus import (
         freeze_training_corpus,
         load_tcz,
         resolve_corpus_path,
     )
 
-    cfg = get_prism_config(config_name)
-    chunk_repr = str(cfg["chunk_repr"])
-    labeling: dict[str, Any] | None = None
-    freeze_info: dict[str, Any] | None = None
+    if isinstance(config_name, str):
+        config_names = parse_config_list(config_name)
+    else:
+        config_names = list(config_name)
+        if not config_names:
+            raise ValueError("config_name list is empty")
 
+    if output is not None and len(config_names) > 1:
+        raise ValueError("--output is only valid when training a single --config")
+
+    labeling: dict[str, Any] | None = None
     if collect_first:
         from fish.prism.collect import collect_samples
         from fish.prism.relevance import label_batch
@@ -800,9 +1015,19 @@ def train_from_corpus(
         labeling = label_batch(limit=label_limit)
         from_db = True
 
+    # Group by chunk_repr so embeddings stay resident while iterating models.
+    # joint and split are separate resident sets (different c matrices);
+    # a dual .tcz still loads once from disk.
+    by_repr: dict[str, list[str]] = {}
+    for name in config_names:
+        repr_key = str(get_prism_config(name)["chunk_repr"])
+        by_repr.setdefault(repr_key, []).append(name)
+
+    freeze_info: dict[str, Any] | None = None
     if from_db:
+        # Dual freeze is the bakeoff default (joint + split in one file).
         freeze_info = freeze_training_corpus(
-            chunk_repr=chunk_repr,
+            chunk_repr="both",
             retriever=retriever,
             prep_fields=True,
         )
@@ -810,79 +1035,110 @@ def train_from_corpus(
     else:
         corpus_ref = corpus
 
-    frozen_path = resolve_corpus_path(corpus_ref)
+    # Prefer dual freeze when training across both reprs.
+    want = "both" if len(by_repr) > 1 else next(iter(by_repr))
+    frozen_path = resolve_corpus_path(corpus_ref, chunk_repr=want)
     frozen = load_tcz(frozen_path)
-    if frozen.chunk_repr != chunk_repr:
-        raise RuntimeError(
-            f"Frozen corpus {frozen.corpus_id} has chunk_repr={frozen.chunk_repr!r} "
-            f"but config {config_name!r} expects {chunk_repr!r}. "
-            f"Freeze with matching --chunk-repr or pick another --corpus."
+    for chunk_repr in by_repr:
+        if not frozen.has_repr(chunk_repr):
+            raise RuntimeError(
+                f"Frozen corpus {frozen.corpus_id} missing chunk_repr={chunk_repr!r} "
+                f"(has {sorted(frozen.c_by_repr)}). Freeze with --chunk-repr both "
+                f"or pass a matching --corpus."
+            )
+
+    runs: list[dict[str, Any]] = []
+    for chunk_repr, names in by_repr.items():
+        pairs = frozen.pairs_for(chunk_repr)
+        if overfit:
+            train, test = pairs, pairs
+        else:
+            train, test = split_pairs(pairs)
+            if not test:
+                test = train
+
+        # Resident pairs shared across configs in this repr group (no reload).
+        baseline = new_identity_model(chunk_repr=chunk_repr)
+        baseline_metrics = evaluate_model(baseline, test)
+
+        if frozen.retrieval_similarity is not None and len(
+            frozen.retrieval_similarity
+        ) == len(pairs):
+            retrieval_rows = [
+                {
+                    "retrieval_similarity": frozen.retrieval_similarity[i],
+                    "target_relevance": pairs[i].relevance,
+                }
+                for i in range(len(pairs))
+            ]
+            retrieval_eval = evaluate_retrieval_similarity(retrieval_rows)
+        else:
+            rows = [
+                {
+                    "retrieval_similarity": float(p.retrieval_similarity or 0.0),
+                    "target_relevance": p.relevance,
+                }
+                for p in pairs
+                if p.retrieval_similarity is not None
+            ]
+            retrieval_eval = (
+                evaluate_retrieval_similarity(rows)
+                if rows
+                else {"spearman_retrieval": 0.0, "count": 0.0, "skipped": True}
+            )
+
+        print(
+            f"prism-train group chunk_repr={chunk_repr} corpus={frozen.corpus_id} "
+            f"configs={names} pairs={len(pairs)} train={len(train)} test={len(test)}",
+            flush=True,
         )
 
-    pairs = frozen.pairs
-    if overfit:
-        train, test = pairs, pairs
-    else:
-        train, test = split_pairs(pairs)
-        if not test:
-            test = train
+        for name in names:
+            cfg = get_prism_config(name)
+            _, metrics = train_prism_model(
+                train,
+                config_name=name,
+                corpus_id=frozen.corpus_id,
+                epochs=epochs,
+                output=output if len(config_names) == 1 else None,
+                eval_pairs=test,
+                resume=resume,
+                fresh=fresh,
+                device=device,
+                register=register,
+                # Multi-config: do not steal active from the production model.
+                activate=False if len(config_names) > 1 else True,
+            )
+            runs.append(
+                {
+                    "config_name": name,
+                    "pairs": len(pairs),
+                    "train": len(train),
+                    "test": len(test),
+                    "overfit": overfit,
+                    "chunk_repr": chunk_repr,
+                    "hidden_dim": int(cfg["hidden_dim"]),
+                    "adapter_sharing": str(cfg["adapter_sharing"]),
+                    "scoring": str(cfg.get("scoring") or "cosine"),
+                    "device": metrics.get("device"),
+                    "baseline": baseline_metrics,
+                    "retrieval_eval": retrieval_eval,
+                    "trained": metrics,
+                    "corpus_id": frozen.corpus_id,
+                    "corpus_path": str(frozen.path),
+                }
+            )
 
-    baseline = new_identity_model(chunk_repr=chunk_repr)
-    baseline_metrics = evaluate_model(baseline, test)
-
-    if frozen.retrieval_similarity is not None and len(frozen.retrieval_similarity) == len(
-        pairs
-    ):
-        retrieval_rows = [
-            {
-                "retrieval_similarity": frozen.retrieval_similarity[i],
-                "target_relevance": pairs[i].relevance,
-            }
-            for i in range(len(pairs))
-        ]
-        retrieval_eval = evaluate_retrieval_similarity(retrieval_rows)
-    else:
-        # Fall back to per-pair fields if present.
-        rows = [
-            {
-                "retrieval_similarity": float(p.retrieval_similarity or 0.0),
-                "target_relevance": p.relevance,
-            }
-            for p in pairs
-            if p.retrieval_similarity is not None
-        ]
-        retrieval_eval = (
-            evaluate_retrieval_similarity(rows)
-            if rows
-            else {"spearman_retrieval": 0.0, "count": 0.0, "skipped": True}
-        )
-
-    _, metrics = train_prism_model(
-        train,
-        config_name=config_name,
-        corpus_id=frozen.corpus_id,
-        epochs=epochs,
-        output=output,
-        eval_pairs=test,
-        resume=resume,
-        fresh=fresh,
-        device=device,
-        register=register,
-    )
-    result = {
-        "pairs": len(pairs),
-        "train": len(train),
-        "test": len(test),
-        "overfit": overfit,
-        "chunk_repr": chunk_repr,
-        "adapter_sharing": str(cfg["adapter_sharing"]),
-        "device": metrics.get("device"),
-        "baseline": baseline_metrics,
-        "retrieval_eval": retrieval_eval,
-        "trained": metrics,
+    result: dict[str, Any] = {
+        "configs": config_names,
+        "runs": runs,
         "corpus_id": frozen.corpus_id,
         "corpus_path": str(frozen.path),
+        "chunk_reprs": list(frozen.chunk_reprs),
     }
+    if len(runs) == 1:
+        # Backward-compatible flat shape for single-config callers.
+        result.update(runs[0])
     if freeze_info is not None:
         result["freeze"] = freeze_info
     if labeling is not None:

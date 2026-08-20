@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
@@ -164,6 +165,8 @@ def label_batch(
 
     Does not hold the Fish write lock across API waits so train/sync can proceed.
     """
+    from compute.tasks import TaskCancelled, TaskProgress
+
     init_db()
     workers = concurrency if concurrency is not None else default_label_concurrency()
     if workers < 1:
@@ -213,19 +216,42 @@ def label_batch(
         rel = _score_and_store(job, client=_client())
         return int(job["sample_id"]), rel
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_work, job): job for job in jobs}
-        for fut in as_completed(futures):
-            job = futures[fut]
-            try:
-                fut.result()
-                labeled += 1
-            except Exception as exc:
-                errors.append(f"sample {job['sample_id']}: {exc}")
+    cancelled = False
+    task_id: str | None = None
+    try:
+        with TaskProgress(
+            module="fish",
+            task="label",
+            n=len(jobs),
+            sec_per_unit_prior=1.5,
+            detail=f"labeling {len(jobs)} samples",
+            resource=os.environ.get("COMPUTE_RESOURCE"),
+        ) as progress:
+            task_id = progress.task_id
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                futures = {pool.submit(_work, job): job for job in jobs}
+                for fut in as_completed(futures):
+                    job = futures[fut]
+                    try:
+                        fut.result()
+                        labeled += 1
+                    except Exception as exc:
+                        errors.append(f"sample {job['sample_id']}: {exc}")
+                    progress.update(
+                        labeled,
+                        detail=f"labeled {labeled}/{len(jobs)}",
+                    )
+    except TaskCancelled:
+        cancelled = True
 
-    return {
+    result = {
         "labeled": labeled,
         "skipped": skipped,
         "errors": errors,
         "concurrency": workers,
     }
+    if task_id:
+        result["task_id"] = task_id
+    if cancelled:
+        result["cancelled"] = True
+    return result

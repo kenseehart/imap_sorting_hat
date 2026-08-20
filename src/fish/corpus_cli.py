@@ -116,9 +116,9 @@ def label(
 @corpus.cmd(output=True)
 def freeze_training(
     chunk_repr: str = optarg(
-        "combined",
+        "both",
         long_flag="--chunk-repr",
-        help="combined | header_body (must match the PRISM config you will train)",
+        help="both (default: joint+split in one .tcz) | joint | split",
     ),
     retriever: str | None = optarg(
         None,
@@ -129,7 +129,7 @@ def freeze_training(
         False,
         long_flag="--no-prep-fields",
         action="store_true",
-        help="Skip header/body field embed prep before freeze (header_body only)",
+        help="Skip header/body field embed prep before freeze (split only)",
     ),
     *,
     json_output: bool = False,

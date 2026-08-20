@@ -19,6 +19,7 @@ dependencies = [
     "tiktoken>=0.7.0",
     "tqdm>=4.66.0",
     "cmdline",
+    "compute",
     "ken-mcp",
     "util",
 ]
@@ -28,6 +29,7 @@ prism = ["torch>=2.0.0"]
 
 [tool.uv.sources]
 cmdline = { path = "../shared/cmdline", editable = true }
+compute = { path = "../compute", editable = true }
 ken-mcp = { path = "../shared/mcp", editable = true }
 util = { path = "../util", editable = true }
 

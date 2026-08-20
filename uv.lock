@@ -385,6 +385,31 @@ wheels = [
 ]
 
 [[package]]
+name = "compute"
+version = "0.1.0"
+source = { editable = "../compute" }
+dependencies = [
+    { name = "cmdline" },
+    { name = "fastmcp" },
+    { name = "mcp" },
+    { name = "python-dotenv" },
+    { name = "pyyaml" },
+    { name = "requests" },
+    { name = "util" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "cmdline", editable = "../shared/cmdline" },
+    { name = "fastmcp", specifier = ">=2.0.0" },
+    { name = "mcp", specifier = ">=1.0.0" },
+    { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "pyyaml", specifier = ">=6.0.0" },
+    { name = "requests", specifier = ">=2.31.0" },
+    { name = "util", editable = "../util" },
+]
+
+[[package]]
 name = "cryptography"
 version = "49.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -659,6 +684,7 @@ source = { editable = "." }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "cmdline" },
+    { name = "compute" },
     { name = "cryptography" },
     { name = "fastmcp" },
     { name = "imapclient" },
@@ -687,6 +713,7 @@ prism = [
 requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.12.0" },
     { name = "cmdline", editable = "../shared/cmdline" },
+    { name = "compute", editable = "../compute" },
     { name = "cryptography", specifier = ">=42.0.0" },
     { name = "fastmcp", specifier = ">=2.0.0" },
     { name = "imapclient", specifier = ">=3.0.0" },

@@ -113,47 +113,55 @@ def embed_field_pending(
     """Backfill header/body raw embeddings for rows that already have combined.
 
     Writes to SQLite only — does not touch Qdrant (field vectors are not ANN indexes).
+    OpenAI calls run outside the DB connection / write lock.
     """
     from fish.store import corpus_needing_field_embeddings, set_raw_field_embeddings
+    from fish.write_lock import fish_write_lock
 
     init_db()
-    with db_conn() as db:
-        pending = corpus_needing_field_embeddings(
-            db, limit=batch_size, training_only=training_only
-        )
-        if not pending:
-            return 0
-        texts: list[str] = []
-        slots: list[tuple[int, str]] = []
-        for i, row in enumerate(pending):
-            header = (row.get("header_json") or "").strip()
-            body = (row.get("body_text") or "").strip()
-            fallback = row.get("text_for_embed") or ""
-            # Only request missing fields
-            if row.get("header_embedding") is None:
-                texts.append(header if header else fallback)
-                slots.append((i, "header"))
-            if row.get("body_embedding") is None:
-                texts.append(body if body else fallback)
-                slots.append((i, "body"))
-        if not texts:
-            return 0
-        vectors = embed_texts(texts)
-        by_item: dict[int, dict[str, list[float]]] = {}
-        for (i, kind), vector in zip(slots, vectors):
-            by_item.setdefault(i, {})[kind] = vector
-        n = 0
-        for i, row in enumerate(pending):
-            parts = by_item.get(i) or {}
-            if not parts:
-                continue
-            set_raw_field_embeddings(
-                db,
-                int(row["id"]),
-                header_embedding=parts.get("header"),
-                body_embedding=parts.get("body"),
+    with fish_write_lock("embed-fields"):
+        with db_conn() as db:
+            pending = corpus_needing_field_embeddings(
+                db, limit=batch_size, training_only=training_only
             )
-            n += 1
+            if not pending:
+                return 0
+            # Materialize row dicts before releasing the lock for OpenAI.
+            pending = [dict(r) for r in pending]
+
+    texts: list[str] = []
+    slots: list[tuple[int, str]] = []
+    for i, row in enumerate(pending):
+        header = (row.get("header_json") or "").strip()
+        body = (row.get("body_text") or "").strip()
+        fallback = row.get("text_for_embed") or ""
+        if row.get("header_embedding") is None:
+            texts.append(header if header else fallback)
+            slots.append((i, "header"))
+        if row.get("body_embedding") is None:
+            texts.append(body if body else fallback)
+            slots.append((i, "body"))
+    if not texts:
+        return 0
+    vectors = embed_texts(texts)
+    by_item: dict[int, dict[str, list[float]]] = {}
+    for (i, kind), vector in zip(slots, vectors):
+        by_item.setdefault(i, {})[kind] = vector
+
+    with fish_write_lock("embed-fields"):
+        with db_conn() as db:
+            n = 0
+            for i, row in enumerate(pending):
+                parts = by_item.get(i) or {}
+                if not parts:
+                    continue
+                set_raw_field_embeddings(
+                    db,
+                    int(row["id"]),
+                    header_embedding=parts.get("header"),
+                    body_embedding=parts.get("body"),
+                )
+                n += 1
     return n
 
 

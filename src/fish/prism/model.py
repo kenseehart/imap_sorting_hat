@@ -13,9 +13,34 @@ import numpy as np
 
 PRZ_FORMAT_VERSION = 4
 
-CHUNK_REPR_COMBINED = "combined"
-CHUNK_REPR_HEADER_BODY = "header_body"
-VALID_CHUNK_REPR = frozenset({CHUNK_REPR_COMBINED, CHUNK_REPR_HEADER_BODY})
+# joint  = E(text(h+b)) — one embed of joined text
+# split  = E(h)‖E(b) — embed parts separately, concat vectors
+CHUNK_REPR_JOINT = "joint"
+CHUNK_REPR_SPLIT = "split"
+VALID_CHUNK_REPR = frozenset({CHUNK_REPR_JOINT, CHUNK_REPR_SPLIT})
+
+# Legacy names still accepted when loading older .prz / .tcz files.
+_CHUNK_REPR_ALIASES = {
+    "combined": CHUNK_REPR_JOINT,
+    "header_body": CHUNK_REPR_SPLIT,
+}
+
+# Back-compat aliases for imports (prefer JOINT / SPLIT in new code).
+CHUNK_REPR_COMBINED = CHUNK_REPR_JOINT
+CHUNK_REPR_HEADER_BODY = CHUNK_REPR_SPLIT
+
+
+def normalize_chunk_repr(value: str | None, *, default: str = CHUNK_REPR_JOINT) -> str:
+    """Map legacy combined/header_body → joint/split; validate."""
+    raw = str(value or default).strip()
+    raw = _CHUNK_REPR_ALIASES.get(raw, raw)
+    if raw not in VALID_CHUNK_REPR:
+        raise ValueError(
+            f"Invalid chunk_repr {value!r} (expected joint|split, "
+            f"legacy combined|header_body also accepted)"
+        )
+    return raw
+
 
 ADAPTER_SHARING_DUAL = "dual"
 ADAPTER_SHARING_SIAMESE = "siamese"
@@ -76,14 +101,14 @@ class PrismModel:
     embed_model: str = "text-embedding-3-small"
     model_id: str | None = None
     config_name: str | None = None
-    chunk_repr: str = CHUNK_REPR_COMBINED
+    chunk_repr: str = CHUNK_REPR_JOINT
     adapter_sharing: str = ADAPTER_SHARING_DUAL
     scoring: str = SCORING_COSINE
     rerank_head: RerankHead | None = None
 
     @property
     def chunk_input_dim(self) -> int:
-        if self.chunk_repr == CHUNK_REPR_HEADER_BODY:
+        if self.chunk_repr == CHUNK_REPR_SPLIT:
             return int(self.embed_dim) * 2
         return int(self.embed_dim)
 
@@ -103,7 +128,7 @@ class PrismModel:
                 f"chunk dim {x.shape[-1]} != chunk_input_dim {expect} "
                 f"(chunk_repr={self.chunk_repr!r})"
             )
-        # Identity baseline for header_body: mean of E(h)|E(b) halves → embed_dim
+        # Identity baseline for split: mean of E(h)|E(b) halves → embed_dim
         # (raw identity would leave 2d and break cosine vs A_q).
         if self.chunk_adapter.identity and expect == 2 * self.embed_dim:
             half = int(self.embed_dim)
@@ -170,9 +195,7 @@ class PrismModel:
                 b2=np.asarray(raw["b2"], dtype=np.float32),
             )
 
-        chunk_repr = str(data.get("chunk_repr") or CHUNK_REPR_COMBINED)
-        if chunk_repr not in VALID_CHUNK_REPR:
-            raise ValueError(f"Invalid chunk_repr {chunk_repr!r}")
+        chunk_repr = normalize_chunk_repr(data.get("chunk_repr"))
         sharing = str(data.get("adapter_sharing") or ADAPTER_SHARING_DUAL)
         if sharing not in VALID_ADAPTER_SHARING:
             raise ValueError(f"Invalid adapter_sharing {sharing!r}")
@@ -203,12 +226,13 @@ class PrismModel:
 
 
 def new_identity_model(
-    dim: int = 1536, *, chunk_repr: str = CHUNK_REPR_COMBINED
+    dim: int = 1536, *, chunk_repr: str = CHUNK_REPR_JOINT
 ) -> PrismModel:
-    """Pass-through adapters (baseline ≈ raw cosine for combined repr)."""
+    """Pass-through adapters (baseline ≈ raw cosine for joint repr)."""
+    chunk_repr = normalize_chunk_repr(chunk_repr)
     if chunk_repr not in VALID_CHUNK_REPR:
         raise ValueError(f"Invalid chunk_repr {chunk_repr!r}")
-    chunk_in = dim * 2 if chunk_repr == CHUNK_REPR_HEADER_BODY else dim
+    chunk_in = dim * 2 if chunk_repr == CHUNK_REPR_SPLIT else dim
 
     def identity_adapter(in_dim: int, out_dim: int) -> PrismAdapter:
         # Unused weights; forward short-circuits via identity=True.
@@ -276,7 +300,7 @@ def save_prz(model: PrismModel, path: Path) -> None:
         arrays["head_w2"] = np.asarray(model.rerank_head.w2, dtype=np.float32)
         arrays["head_b2"] = np.asarray(model.rerank_head.b2, dtype=np.float32)
     buf = io.BytesIO()
-    np.savez_compressed(buf, **arrays)
+    np.savez(buf, **arrays)  # uncompressed: savez_compressed was multi-minute on 1536-d adapters
     weights_bytes = buf.getvalue()
     with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("manifest.json", json.dumps(manifest, indent=2))
@@ -298,9 +322,7 @@ def load_prz(path: Path) -> PrismModel:
         weights_bytes = zf.read("weights.npz")
     data = np.load(io.BytesIO(weights_bytes))
     fmt = int(manifest.get("format") or 1)
-    chunk_repr = str(manifest.get("chunk_repr") or CHUNK_REPR_COMBINED)
-    if chunk_repr not in VALID_CHUNK_REPR:
-        raise ValueError(f"Invalid chunk_repr in {path}: {chunk_repr!r}")
+    chunk_repr = normalize_chunk_repr(manifest.get("chunk_repr"))
     sharing = str(manifest.get("adapter_sharing") or ADAPTER_SHARING_DUAL)
     if sharing not in VALID_ADAPTER_SHARING:
         raise ValueError(f"Invalid adapter_sharing in {path}: {sharing!r}")

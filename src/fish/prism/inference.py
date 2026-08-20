@@ -99,12 +99,17 @@ def compose_chunk_vector(
     chunk_repr: str,
 ) -> np.ndarray | None:
     """Frozen chunk vector from SQLite raw embeds for train / re-index."""
-    from fish.prism.model import CHUNK_REPR_COMBINED, CHUNK_REPR_HEADER_BODY
+    from fish.prism.model import (
+        CHUNK_REPR_JOINT,
+        CHUNK_REPR_SPLIT,
+        normalize_chunk_repr,
+    )
     from fish.store import get_raw_embedding, get_raw_field_embeddings
 
-    if chunk_repr == CHUNK_REPR_COMBINED:
+    chunk_repr = normalize_chunk_repr(chunk_repr)
+    if chunk_repr == CHUNK_REPR_JOINT:
         return get_raw_embedding(db, item_id)
-    if chunk_repr == CHUNK_REPR_HEADER_BODY:
+    if chunk_repr == CHUNK_REPR_SPLIT:
         fields = get_raw_field_embeddings(db, item_id)
         h, b = fields.get("header"), fields.get("body")
         if h is None or b is None:

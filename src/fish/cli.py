@@ -282,7 +282,13 @@ def import_corpus(
 @cmd(output=True)
 def prism_train(
     config: str = optarg(
-        "smoke_combined", long_flag="--config", help="PRISM config name from prism_models.yaml"
+        "smoke_joint",
+        long_flag="--config",
+        help=(
+            "PRISM config(s): one name, comma-list, 'bakeoff' (non-smoke), "
+            "'smoke', or 'all'. Same chunk_repr configs share resident pairs; "
+            "joint vs split are separate resident groups from one dual .tcz."
+        ),
     ),
     epochs: int | None = optarg(
         None,

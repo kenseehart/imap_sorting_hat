@@ -3,60 +3,46 @@
 #
 # Override or extend in ~/.config/fish/prism_models.yaml
 #
+# Naming: {arch}_h{hidden}
+#   joint   — dual adapters, chunk_repr=joint  (E(text(h+b)) — one embed)
+#   siamese — shared A, chunk_repr=joint
+#   split   — dual adapters, chunk_repr=split  (E(h)‖E(b) — two embeds, concat)
+#   rerank  — split adapters + MLP head (no cosine); second-stage scorer
+#
+# hidden_dim = adapter MLP width (in → hidden → embed_dim).
+# head_hidden = rerank MLP width (defaults to hidden_dim when unset in code).
+#
 # chunk_repr:
-#   combined     — E(h+b): OpenAI embed of combined text_for_embed
-#   header_body  — E(h)&E(b): concat(header_embedding, body_embedding) → A_c
+#   joint  — join text (header+body), embed once → 1536-d
+#   split  — embed header and body separately, concat vectors → 3072-d
 #
 # epochs = max epochs (ceiling). early_stop_patience > 0 → stop when holdout
 # Spearman fails to improve by early_stop_min_delta for that many epochs;
 # best holdout weights are kept. patience 0 → always run all epochs (smoke).
 
-# Overfit smokes: high epochs, no weight decay — train-set Spearman should soar if pipeline works.
-smoke_combined:
+# --- Overfit smokes (pipeline check) ---
+smoke_joint:
   epochs: 80
   early_stop_patience: 0
   lr: 1.0e-3
   batch_size: 64
   weight_decay: 0.0
   embed_dim: 1536
-  chunk_repr: combined
+  hidden_dim: 1536
+  chunk_repr: joint
   adapter_sharing: dual
 
-smoke_fields:
+smoke_split:
   epochs: 80
   early_stop_patience: 0
   lr: 1.0e-3
   batch_size: 64
   weight_decay: 0.0
   embed_dim: 1536
-  chunk_repr: header_body
+  hidden_dim: 1536
+  chunk_repr: split
   adapter_sharing: dual
 
-# Personal: train until holdout Spearman stalls (patience), capped by epochs.
-personal_combined:
-  epochs: 200
-  early_stop_patience: 15
-  early_stop_min_delta: 0.001
-  lr: 2.0e-5
-  batch_size: 64
-  weight_decay: 0.01
-  embed_dim: 1536
-  chunk_repr: combined
-  adapter_sharing: dual
-
-personal_fields:
-  epochs: 200
-  early_stop_patience: 15
-  early_stop_min_delta: 0.001
-  lr: 2.0e-5
-  batch_size: 64
-  weight_decay: 0.01
-  embed_dim: 1536
-  chunk_repr: header_body
-  adapter_sharing: dual
-
-# Shared A for query and chunk (true siamese). combined only — header_body
-# needs asymmetric A_c (3072→1536).
 smoke_siamese:
   epochs: 80
   early_stop_patience: 0
@@ -64,32 +50,99 @@ smoke_siamese:
   batch_size: 64
   weight_decay: 0.0
   embed_dim: 1536
-  chunk_repr: combined
+  hidden_dim: 1536
+  chunk_repr: joint
   adapter_sharing: siamese
+
+# --- Bakeoff: arch × hidden (train until holdout stalls) ---
+_BAKEOFF: &bakeoff
+  epochs: 200
+  early_stop_patience: 15
+  early_stop_min_delta: 0.001
+  lr: 2.0e-5
+  batch_size: 64
+  weight_decay: 0.01
+  embed_dim: 1536
+
+joint_h1536:
+  <<: *bakeoff
+  hidden_dim: 1536
+  chunk_repr: joint
+  adapter_sharing: dual
+
+joint_h3072:
+  <<: *bakeoff
+  hidden_dim: 3072
+  chunk_repr: joint
+  adapter_sharing: dual
+
+siamese_h1536:
+  <<: *bakeoff
+  hidden_dim: 1536
+  chunk_repr: joint
+  adapter_sharing: siamese
+
+siamese_h3072:
+  <<: *bakeoff
+  hidden_dim: 3072
+  chunk_repr: joint
+  adapter_sharing: siamese
+
+split_h1536:
+  <<: *bakeoff
+  hidden_dim: 1536
+  chunk_repr: split
+  adapter_sharing: dual
+
+split_h3072:
+  <<: *bakeoff
+  hidden_dim: 3072
+  chunk_repr: split
+  adapter_sharing: dual
+
+# Pair MLP on split-style adapters — no cosine.
+# score = σ(MLP(Aq(E(q)) ‖ Ac(E(h)|E(b)))). ANN still uses split_*;
+# this model reranks those candidates (NWRA / eval).
+rerank_h1536:
+  <<: *bakeoff
+  hidden_dim: 1536
+  head_hidden: 1536
+  chunk_repr: split
+  adapter_sharing: dual
+  scoring: mlp_head
+
+rerank_h3072:
+  <<: *bakeoff
+  hidden_dim: 3072
+  head_hidden: 3072
+  chunk_repr: split
+  adapter_sharing: dual
+  scoring: mlp_head
+
+# --- Legacy personal_* names (model_id prefix; combined≡joint, fields≡split) ---
+personal_combined:
+  <<: *bakeoff
+  hidden_dim: 1536
+  chunk_repr: combined
+  adapter_sharing: dual
+
+personal_fields:
+  <<: *bakeoff
+  hidden_dim: 1536
+  chunk_repr: header_body
+  adapter_sharing: dual
 
 personal_siamese:
-  epochs: 200
-  early_stop_patience: 15
-  early_stop_min_delta: 0.001
-  lr: 2.0e-5
-  batch_size: 64
-  weight_decay: 0.01
-  embed_dim: 1536
+  <<: *bakeoff
+  hidden_dim: 1536
   chunk_repr: combined
   adapter_sharing: siamese
 
-# Pair MLP on personal_fields-style adapters — no cosine.
-# score = σ(MLP(Aq(E(q)) ‖ Ac(E(h)|E(b)))). ANN still uses personal_fields;
-# this model reranks those candidates (NWRA / eval).
 personal_rerank:
-  epochs: 200
-  early_stop_patience: 15
-  early_stop_min_delta: 0.001
-  lr: 2.0e-5
-  batch_size: 64
-  weight_decay: 0.01
-  embed_dim: 1536
+  <<: *bakeoff
+  hidden_dim: 1536
+  head_hidden: 512
   chunk_repr: header_body
   adapter_sharing: dual
   scoring: mlp_head
-  head_hidden: 512
+

@@ -178,6 +178,38 @@ compute down runpod-l4
 CPU label/freeze: prefer `runpod-cpu32` (see `workloads` in `compute.yaml`).
 RunPod cold start is often **1–3 minutes** (longer if the image must pull).
 
+### RunPod L4 pitfalls (learned running an 8-model bakeoff)
+
+- **Only `/workspace` survives a pod stop/restart.** `runpod-l4`'s container
+  disk is ephemeral; the network volume (`daime_prism_volume`) is mounted at
+  `/workspace`. A pod can stop mid-job (observed: RunPod marked it "exited"
+  during an unattended multi-hour bakeoff train, cause unconfirmed — possibly
+  a platform idle/host-maintenance action, not something we triggered). Any
+  model/checkpoint/corpus written outside `/workspace` is lost. Always set
+  `FISH_DATA_DIR=/workspace/fish` (and `models/checkpoints/` under it) before
+  long unattended training on this pod — never let output default under
+  `/root` or the container's own disk.
+- **Re-bind after every restart.** A restarted pod gets a new public IP/port;
+  `compute run runpod-l4 …` fails with a stale-endpoint error until you
+  `compute bind runpod-l4 --ssh root@<new-ip>:<new-port>` (copy the exposed
+  TCP line from the RunPod console, or the API pod detail) again.
+- **The base image is not fish-ready.** Despite `compute/AGENTS.md` saying
+  "no extra install" for `runpod-torch-v280`, it only has PyTorch/CUDA +
+  JupyterLab — no `fish` deps. Expect to `pip install` (into the pod's
+  system/user site, `--no-deps` to avoid clobbering the preinstalled torch
+  build): `imapclient openai tiktoken scikit-learn qdrant-client
+  beautifulsoup4 cryptography python-dotenv pyyaml numpy scipy`, plus
+  editable installs of `cmdline`, `compute`, `util` from their repo paths
+  under `/workspace`. A leftover `/workspace/fish/fish/.venv` from an earlier
+  attempt looked plausible but had none of these — don't trust a found venv
+  without checking `pip list`.
+- **No `rsync` on the pod image.** Falls back to `scp`; `compute sync`'s
+  rsync path assumes rsync exists on both ends and fails with "command not
+  found" on the remote side.
+- Net effect: a from-scratch RunPod L4 session for fish costs real setup time
+  before any GPU work starts. Worth solving once — see the shared-filesystem
+  question in the next session's docs.
+
 **Upload an import from laptop:**
 
 ```bash
@@ -202,6 +234,17 @@ sitehost deploy-mcp-gateway
 ```
 
 Then run label → freeze → train on RunPod (`runpod-cpu32` / `runpod-l4`), not on MCP.
+
+## MCP gateway code layout (`gcp-e2-mcp`)
+
+`sitehost deploy-mcp-gateway` is the supported way to ship code changes to
+the gateway. If you ever need to hand-patch one file for a quick fix,
+the fish package lives **nested one level deeper than the repo layout**:
+`/home/mcp/mcp-gateway/src/fish/src/fish/prism/nwra_eval.py` (i.e.
+`mcp-gateway/src/fish/` is a checkout of this repo, which itself has
+`src/fish/...`) — not `/home/mcp/mcp-gateway/src/fish/prism/...`. Prefer the
+real deploy path; verify with `compute run gcp-e2-mcp 'find /home/mcp/mcp-gateway -name nwra_eval.py'`
+if unsure before copying.
 
 ## SQLite
 

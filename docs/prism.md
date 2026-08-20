@@ -30,24 +30,35 @@ exist so PRISM can compute e.g. \(A_c(E(h)\,\|\,E(b))\) without calling OpenAI a
 
 Configs in [`config/prism_models.yaml`](../config/prism_models.yaml):
 
-| Config | `chunk_repr` | `adapter_sharing` | Chunk vector |
-|--------|--------------|-------------------|--------------|
-| `smoke_combined` / `personal_combined` | `combined` | `dual` | \(E(h{+}b)\) = embed(`text_for_embed`) |
-| `smoke_fields` / `personal_fields` | `header_body` | `dual` | \(E(h)\,\&\,E(b)\) = concat(header, body) embeds |
-| `smoke_siamese` / `personal_siamese` | `combined` | `siamese` | same as combined; shared \(A=A_q=A_c\) |
-| `personal_rerank` | `header_body` | `dual` + `scoring: mlp_head` | \(\sigma(\mathrm{MLP}(A_q(E(q))\,\|\,A_c(E(h)\|E(b))))\) — no cosine; reranks fields candidates |
+| Config | `chunk_repr` | Sharing / scoring | Notes |
+|--------|--------------|-------------------|-------|
+| `joint_h{1536,3072}` | `joint` | dual | \(E(\mathrm{text}(h{+}b))\); `hidden_dim` = adapter width |
+| `siamese_h{1536,3072}` | `joint` | siamese | shared \(A=A_q=A_c\) |
+| `split_h{1536,3072}` | `split` | dual | \(E(h)\,\|\,E(b)\) |
+| `rerank_h{1536,3072}` | `split` | dual + `mlp_head` | \(\sigma(\mathrm{MLP}(A_q\|A_c))\) — reranks split |
+| `smoke_*` | … | … | overfit pipeline checks |
 
-`siamese` is incompatible with `header_body` (asymmetric \(A_c\) input dim).
-`personal_rerank` is not an ANN index; NWRA applies it as a second-stage scorer on the same labeled candidate sets (fields-style vectors).
+`chunk_repr`: **joint** = join text then embed once; **split** = embed header/body
+separately then concat vectors. `fish prism-train --config bakeoff` expands to
+the 8 arch×hidden configs (`joint_h*`, `siamese_h*`, `split_h*`, `rerank_h*`) —
+it excludes `smoke_*`, YAML anchors (`_*`), **and** the legacy `personal_*`
+aliases so the sweep stays a fair 8-way compare (`list_bakeoff_config_names()`
+in `src/fish/prism/configs.py`). Pass `personal_*` names explicitly if you
+want the old models. Freeze defaults to `--chunk-repr both` (joint + split in
+one `.tcz`).
+
+`siamese` is incompatible with `split` (asymmetric \(A_c\) input dim).
+`rerank_*` is not an ANN index; NWRA applies it as a second-stage scorer on the
+same labeled candidate sets (split-style vectors).
 
 Adapters are plain MLPs (**no residual α**). Dual PRISM uses separate \(A_q, A_c\);
 siamese uses one shared adapter (still serialized into both `.prz` slots). Overfit
-smoke (train-set only; `header_body` auto-preps field embeds for labeled items —
+smoke (train-set only; `split` auto-preps field embeds for labeled items —
 not the full corpus):
 
 ```bash
-fish prism-train --config smoke_combined --overfit --json
-fish prism-train --config smoke_fields --overfit --json
+fish prism-train --config smoke_joint --overfit --json
+fish prism-train --config smoke_split --overfit --json
 fish prism-train --config smoke_siamese --overfit --json
 ```
 
@@ -81,7 +92,7 @@ for `early_stop_patience` epochs (default 15 / 0.001). The best holdout weights
 are written to the `.prz`. Smoke configs set `early_stop_patience: 0` (fixed
 epoch count).
 
-Full-corpus field backfill (for deploying `header_body` retrieval over all mail):
+Full-corpus field backfill (for deploying `split` retrieval over all mail):
 
 ```bash
 fish embed --fields          # all missing header/body vectors
@@ -131,9 +142,9 @@ fish corpus freeze-training --chunk-repr combined
 
 # 4. Train from frozen .tcz (default --corpus latest; epochs never touch fish.db)
 #    (resumable via models/checkpoints/{config}.pt; --fresh to restart)
-fish prism-train --config smoke_combined --overfit
-fish prism-train --config smoke_fields --overfit --from-db   # freeze header_body then train
-fish prism-train --config smoke_combined --overfit --gpu     # CUDA A/B vs CPU
+fish prism-train --config smoke_joint --overfit
+fish prism-train --config smoke_split --overfit --from-db   # freeze both then train
+fish prism-train --config smoke_joint --overfit --gpu     # CUDA A/B vs CPU
 
 # 5. Embed a smoke slice (OpenAI once → SQLite raw + Qdrant legacy)
 fish embed --limit 100 --kinds email \
@@ -152,6 +163,46 @@ FISH_PRISM_MODEL=smoke.<timestamp> fish search "Burning Man" --since 2026-07-16
 |-------|-----|
 | Adapter fidelity | `fish prism-train` reports Spearman raw vs PRISM on held-out pairs |
 | Personal goal | Adapted-cosine top-10 for `Burning Man` includes camp mail without requiring those words |
+| Competitive bakeoff | `fish.prism.nwra_eval` — see below |
+
+### NWRA (competitive multi-model eval)
+
+`src/fish/prism/nwra_eval.py` ranks candidates within each query and compares
+model order to the RA-optimal order:
+
+\[
+\mathrm{NWRA} = \frac{\mathrm{WRA}(\text{model order})}{\mathrm{WRA}(\text{RA-optimal order})},
+\qquad \mathrm{WRA}(\text{rels}) = \frac{\sum_i w_i \, r_i}{\sum_i w_i},\quad w_i = \frac{1}{2+i}
+\]
+
+Also reports Spearman(model_score, RA) over the same pairs. Null when the
+perfect-order WRA is 0 (all-zero relevance query).
+
+**Scores from the frozen dual `.tcz` only** (`q` / `c_joint` / `c_split` /
+`rel` — the same arrays `fish prism-train` uses), batched per model with
+NumPy. It does **not** open `fish.db` or hit SQLite in the hot path — an
+earlier version loaded `training_samples` live and re-fetched
+header/body raw embeddings per pair per model, which meant ~10⁵ SQLite
+lookups plus full blob decode of ~11k embeddings just to build a ranking
+report. Same anti-pattern as copying `fish.db` to a RunPod: using the
+canonical DB as scratch compute for something a 100 MB frozen artifact
+already covers. Do not revert to a live-DB per-pair path.
+
+Registers as compute task `nwra` (module `fish`) via `TaskProgress` so it's
+visible in `compute tasks` / the tasks UI — a job that never wraps itself in
+`TaskProgress` runs invisibly even at 100% CPU (see `compute/AGENTS.md`).
+
+```bash
+# On the host holding the frozen .tcz (or with FISH_DATA_DIR pointed at it):
+python -m fish.prism.nwra_eval \
+  --corpus latest \
+  --model-id joint_h1536.<ts> --model-id split_h3072.<ts> ... \
+  --out /data/fish/nwra_report.json
+```
+
+`legacy` (identity/raw cosine) is always included as the baseline system.
+`--corpus` accepts `latest`, a `train_corpus_*` id, or a path — same
+resolution as `fish prism-train --corpus`.
 
 ## Ops
 
