@@ -104,6 +104,7 @@ fish connect <email>
 | `fish embed` | Embed pending combined vectors (SQLite + Qdrant); also embeds header/body into SQLite |
 | `fish embed --fields` | Backfill `header_json` + header/body raw embeddings in SQLite only (no Qdrant) |
 | `fish prism-train` | Train from frozen `.tcz` (`--corpus latest`) → `{config}.{timestamp}.prz`; `--from-db` freezes first; `--gpu` / `--overfit` |
+| `fish runpod-setup` | Persist venv + `FISH_DATA_DIR=/workspace/fish` on the RunPod volume (first session: `python3 src/fish/runpod_setup.py`) |
 | `fish prism-reembed` | Rewrite PRISM Qdrant collection from raw (streamed, skips existing; `--force` rewrites); `--limit` / `--like` / `--since` for smoke |
 | `fish qdrant-migrate` | One-shot: copy sqlite-vec → `corpus_raw_embeddings` + upsert legacy Qdrant collection |
 | `fish qdrant-reindex` | Upsert `corpus_raw_embeddings` into legacy Qdrant (skips existing ids; `--force` rewrites) |
@@ -151,6 +152,8 @@ FISH_PRISM_MODEL=personal.prz
 ```
 
 Heavy training: RunPod per [`compute.yaml`](compute.yaml), [`docs/cloud.md`](docs/cloud.md), and [`docs/deploy.md`](docs/deploy.md).
+On RunPod, `FISH_DATA_DIR` must be under `/workspace` (fail-fast); MCP and
+`fish.db` stay on `gcp-e2-mcp` — no cross-cloud shared filesystem.
 
 ## Task progress (shared)
 

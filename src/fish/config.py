@@ -12,12 +12,45 @@ ENV_PATH = CONFIG_DIR / "fish.env"
 ACCOUNTS_PATH = CONFIG_DIR / "accounts.yaml"
 ACTIONS_LOG = CONFIG_DIR / "actions.log"
 
+# RunPod network volume. Container disk is ephemeral — see docs/cloud.md.
+RUNPOD_VOLUME_ROOT = Path("/workspace")
+RUNPOD_DATA_DIR = RUNPOD_VOLUME_ROOT / "fish"
+
+
+def on_runpod() -> bool:
+    """True inside a RunPod container (pod id is injected into the environment)."""
+    return bool(os.getenv("RUNPOD_POD_ID", "").strip())
+
+
+def path_is_on_runpod_volume(path: Path, *, volume_root: Path = RUNPOD_VOLUME_ROOT) -> bool:
+    """Return whether ``path`` resolves under the RunPod network volume."""
+    try:
+        path.expanduser().resolve().relative_to(volume_root.expanduser().resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def require_runpod_persistent_path(path: Path, *, what: str = "FISH_DATA_DIR") -> None:
+    """Fail fast on RunPod when a data path would land on ephemeral container disk."""
+    if not on_runpod():
+        return
+    if path_is_on_runpod_volume(path):
+        return
+    raise RuntimeError(
+        f"On RunPod, {what} must be under {RUNPOD_VOLUME_ROOT} so artifacts "
+        f"survive pod stop (got {path}). Set FISH_DATA_DIR={RUNPOD_DATA_DIR} "
+        f"(and keep FISH_DB_PATH under that tree). Run `fish runpod-setup` "
+        f"or `python3 src/fish/runpod_setup.py` from a checkout on the volume."
+    )
+
 
 def data_dir() -> Path:
     """Corpus data root (db, models, imports). Default ~/.config/fish; cloud uses FISH_DATA_DIR."""
     load_env()
     raw = os.getenv("FISH_DATA_DIR", "").strip()
     path = Path(raw).expanduser() if raw else CONFIG_DIR
+    require_runpod_persistent_path(path, what="FISH_DATA_DIR")
     path.mkdir(parents=True, exist_ok=True)
     (path / "models").mkdir(parents=True, exist_ok=True)
     (path / "imports").mkdir(parents=True, exist_ok=True)
@@ -28,7 +61,9 @@ def db_path() -> Path:
     load_env()
     raw = os.getenv("FISH_DB_PATH", "").strip()
     if raw:
-        return Path(raw).expanduser()
+        path = Path(raw).expanduser()
+        require_runpod_persistent_path(path, what="FISH_DB_PATH")
+        return path
     return data_dir() / "fish.db"
 
 

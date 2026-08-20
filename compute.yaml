@@ -10,9 +10,13 @@ workloads:
   label: runpod-cpu32
   freeze: runpod-cpu32
 
-# Canonical fish.db lives on gcp-e2-mcp (GCP VM mcp-services) at /data/fish/fish.db.
-# Heavy label/freeze/train: RunPod workers — not the MCP host.
-#   compute up runpod-cpu32   # or runpod-l4 for --gpu train
-#   compute sync gcp-e2-mcp pull fish.db
-#   compute sync runpod-l4 push models/   # after train
+# Canonical fish.db lives on gcp-e2-mcp at /data/fish/fish.db — not on RunPod.
+# No cross-cloud POSIX mount. Worker disk is the RunPod volume /workspace.
+#   cd ~/ws
+#   compute sync runpod-l4 --push fish
+#   compute sync runpod-l4 --push compute
+#   compute sync runpod-l4 --push shared/cmdline
+#   compute run runpod-l4 --cwd /workspace/fish -- python3 src/fish/runpod_setup.py
+#   source /workspace/fish/env.sh && fish prism-train --gpu
+#   compute sync gcp-e2-mcp --push models/   # finished .prz
 #   compute down runpod-l4

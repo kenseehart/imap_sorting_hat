@@ -163,52 +163,76 @@ compute run gcp-e2-mcp --cwd /tmp -- \
 
 ## Laptop / RunPod (sparse compute)
 
-The laptop is for **code** and **uploading imports**. Heavy PRISM work runs on
-RunPod workers (`fish/compute.yaml` workloads), not on `gcp-e2-mcp`.
+The laptop is for **code** and **uploading imports**. GPU train runs on
+RunPod (`runpod-l4`). Do **not** copy canonical `fish.db` to a worker for
+epochs — freeze a `.tcz` on the MCP host (or sync that snapshot) and train
+from it. MCP, Qdrant, and `fish.db` stay on `gcp-e2-mcp`.
+
+There is **no** cross-cloud POSIX filesystem (GCS FUSE / Filestore / rclone
+mount). SQLite + `fcntl.flock` require the GCP PD. The RunPod network volume
+at `/workspace` is the worker persistence domain (venv, checkpoints, `.tcz`,
+`.prz`). Do not move the MCP server onto that volume.
 
 ```bash
-# Example: GPU train on runpod-l4
+# GPU train on runpod-l4 (after bootstrap, below)
 compute up runpod-l4
-compute sync gcp-e2-mcp pull fish.db          # or sync .tcz / models as needed
-# … run fish prism-train on the pod …
-compute sync gcp-e2-mcp push models/personal.prz
+# sync a frozen .tcz onto the volume, or freeze on the pod from a snapshot
+compute sync runpod-l4 --push models/corpora/
+# … source /workspace/fish/env.sh && fish prism-train …
+compute sync gcp-e2-mcp --push models/   # finished .prz back to canonical models/
 compute down runpod-l4
 ```
 
-CPU label/freeze: prefer `runpod-cpu32` (see `workloads` in `compute.yaml`).
-RunPod cold start is often **1–3 minutes** (longer if the image must pull).
+CPU label/freeze: still routed to `runpod-cpu32` in `compute.yaml` (they need
+the live DB). Prefer not to round-trip `fish.db`; a later change may run
+those on `gcp-e2-mcp` now that it has 16 GB RAM. RunPod cold start is often
+**1–3 minutes** (longer if the image must pull).
+
+### RunPod volume bootstrap
+
+Only `/workspace` survives a pod stop. `fish` **fail-fasts** on RunPod unless
+`FISH_DATA_DIR` (and `FISH_DB_PATH`, if set) resolve under `/workspace`.
+First session on a volume (from `~/ws`, so resource `local_root` is the
+workspace — not from `fish/` which would nest paths):
+
+```bash
+compute up runpod-l4
+# re-bind if the pod recycled its SSH endpoint
+cd ~/ws
+compute sync runpod-l4 --push fish
+compute sync runpod-l4 --push compute
+compute sync runpod-l4 --push shared/cmdline
+# Do not rsync a laptop fish.db onto the volume (epochs use a .tcz).
+compute run runpod-l4 --cwd /workspace/fish -- python3 src/fish/runpod_setup.py
+# later sessions, venv already on the volume:
+#   source /workspace/fish/env.sh && fish prism-train --config bakeoff --gpu
+```
+
+`runpod_setup.py` is stdlib-only so it runs on the stock torch image. It
+writes `FISH_DATA_DIR=/workspace/fish` into `~/.config/fish/fish.env`,
+creates `/workspace/fish/.venv` with `--system-site-packages` (reuses image
+CUDA torch — does not pip-install torch), installs fish's train deps,
+editable `cmdline` / `compute` / fish, and `apt-get install rsync`.
+Idempotent. Do not trust a leftover `/workspace/fish/fish/.venv` from older
+attempts — this path is `/workspace/fish/.venv`. If that venv is broken,
+`rm -rf /workspace/fish/.venv` and re-run setup.
 
 ### RunPod L4 pitfalls (learned running an 8-model bakeoff)
 
-- **Only `/workspace` survives a pod stop/restart.** `runpod-l4`'s container
-  disk is ephemeral; the network volume (`daime_prism_volume`) is mounted at
-  `/workspace`. A pod can stop mid-job (observed: RunPod marked it "exited"
-  during an unattended multi-hour bakeoff train, cause unconfirmed — possibly
-  a platform idle/host-maintenance action, not something we triggered). Any
-  model/checkpoint/corpus written outside `/workspace` is lost. Always set
-  `FISH_DATA_DIR=/workspace/fish` (and `models/checkpoints/` under it) before
-  long unattended training on this pod — never let output default under
-  `/root` or the container's own disk.
+- **Ephemeral container disk.** A pod can stop mid-job (observed: RunPod
+  marked it "exited" during an unattended bakeoff). Checkpoints live at
+  `/workspace/fish/models/checkpoints/` only if `FISH_DATA_DIR=/workspace/fish`.
+  Writing under `/root` loses the run. Resume: same `fish prism-train` command.
 - **Re-bind after every restart.** A restarted pod gets a new public IP/port;
   `compute run runpod-l4 …` fails with a stale-endpoint error until you
   `compute bind runpod-l4 --ssh root@<new-ip>:<new-port>` (copy the exposed
   TCP line from the RunPod console, or the API pod detail) again.
-- **The base image is not fish-ready.** Despite `compute/AGENTS.md` saying
-  "no extra install" for `runpod-torch-v280`, it only has PyTorch/CUDA +
-  JupyterLab — no `fish` deps. Expect to `pip install` (into the pod's
-  system/user site, `--no-deps` to avoid clobbering the preinstalled torch
-  build): `imapclient openai tiktoken scikit-learn qdrant-client
-  beautifulsoup4 cryptography python-dotenv pyyaml numpy scipy`, plus
-  editable installs of `cmdline`, `compute`, `util` from their repo paths
-  under `/workspace`. A leftover `/workspace/fish/fish/.venv` from an earlier
-  attempt looked plausible but had none of these — don't trust a found venv
-  without checking `pip list`.
-- **No `rsync` on the pod image.** Falls back to `scp`; `compute sync`'s
-  rsync path assumes rsync exists on both ends and fails with "command not
-  found" on the remote side.
-- Net effect: a from-scratch RunPod L4 session for fish costs real setup time
-  before any GPU work starts. Worth solving once — see the shared-filesystem
-  question in the next session's docs.
+- **`pgrep -f` self-match when polling over SSH.** A liveness check like
+  `ssh pod "echo RUN=$(pgrep -f 'python3 -m fish prism-train' | head -1)"`
+  matches its own remote shell process, because that literal string appears
+  in the command line passed to `pgrep -f`. Result: `running` stays true
+  after the job finished. Use a completion marker in the log, expected
+  output files, or exclude the poller's pid.
 
 **Upload an import from laptop:**
 

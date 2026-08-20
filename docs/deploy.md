@@ -17,14 +17,15 @@ Registered at [claude.ai/customize/connectors](https://claude.ai/customize/conne
 
 ## PRISM training (RunPod)
 
-**Training** uses `compute` — see `fish/compute.yaml` (`runpod-l4`: L4, 86 GB RAM, ~$0.39/hr; label/freeze on `runpod-cpu32`).
-
-Pull a snapshot of the cloud db before training:
+**Training** uses `compute` — see `fish/compute.yaml` (`runpod-l4`: L4, 86 GB RAM, ~$0.39/hr; label/freeze on `runpod-cpu32`). Train from a frozen `.tcz`, not a copy of canonical `fish.db`. On RunPod, `FISH_DATA_DIR` must be `/workspace/fish` (see [`cloud.md`](cloud.md) bootstrap).
 
 ```bash
-compute sync gcp-e2-mcp pull fish.db
-FISH_DB_PATH=~/.config/fish/fish.db fish prism-train
-compute sync gcp-e2-mcp push models/personal.prz
+compute up runpod-l4
+# first session on the volume:
+#   python3 src/fish/runpod_setup.py
+source /workspace/fish/env.sh
+fish prism-train --config bakeoff --gpu
+compute sync gcp-e2-mcp --push models/
 ```
 
 Bind the live pod after IP/port changes (RunPod console → **SSH over exposed TCP**):

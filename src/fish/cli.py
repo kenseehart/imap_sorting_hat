@@ -931,6 +931,30 @@ def repair_headers(
 
 
 @cmd(output=True)
+def runpod_setup(
+    allow_non_runpod: bool = optarg(
+        False,
+        long_flag="--allow-non-runpod",
+        action="store_true",
+        help="Run the installer off RunPod (for testing only)",
+    ),
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """Bootstrap a persistent venv + FISH_DATA_DIR on the RunPod /workspace volume."""
+    from fish.runpod_setup import setup_runpod
+
+    try:
+        payload = setup_runpod(allow_non_runpod=allow_non_runpod)
+    except RuntimeError as exc:
+        print(exc, file=sys.stderr)
+        return 1
+    emit_output(payload, json_output=json_output, md=md_output, title="Fish RunPod setup")
+    return 0
+
+
+@cmd(output=True)
 def write_lock_status(*, json_output: bool = False, md_output: bool = False) -> int:
     """Show whether the Fish DB write flock is held (probe; dead PIDs cannot stick)."""
     status = read_lock_status()
