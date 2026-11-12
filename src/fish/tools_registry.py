@@ -156,8 +156,12 @@ def register_tools(mcp: Any, as_json: bool = True, audit_decorator: Any = None) 
         since: str | None = None,
         until: str | None = None,
         from_contains: str | None = None,
+        keyword: bool = True,
+        rerank: bool | None = None,
     ) -> Any:
-        """ANN search (PRISM/legacy). Hard filters: since/until/from/account/folder/kinds/unread. No keyword hybrid."""
+        """Hybrid search: vector + BM25 keywords fused by rank, then the top hits are
+        relevance-reranked (rerank=None follows FISH_RERANK). Hard filters apply to both
+        arms: since/until/from/account/folder/kinds/unread. model_id is legacy unless given."""
         sync_meta: dict[str, Any] | None = None
         if sync_before_search:
             try:
@@ -193,6 +197,8 @@ def register_tools(mcp: Any, as_json: bool = True, audit_decorator: Any = None) 
             since=since,
             until=until,
             from_contains=from_contains,
+            keyword=keyword,
+            rerank=rerank,
         )
         if sync_meta is not None:
             result = {**result, "sync": sync_meta}

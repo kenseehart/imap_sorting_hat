@@ -1,22 +1,10 @@
-# Default resource for sync / compute run when using ``.`` from this repo.
-# Use-case routing (workloads) is separate from hardware inventory names.
-resource: runpod-l4
+# Fish runs on gcp-e2-mcp: corpus, Qdrant, keyword index, MCP and IMAP sync.
+# PRISM is SHELVED (Ken, 2026-11-12; docs/prism.md): no RunPod workloads. Its
+# whole RunPod bill ($348, Jun-Sep 2026) was an L4 left up 24 h/day; the
+# adapters train in minutes on CPU. To revive it, train on CPU here or add
+#   workloads: { train: runpod-24g, label: gcp-e2-mcp, freeze: gcp-e2-mcp }
+# (runpod-24g: cheapest 24 GB Community card, capped $/h; see compute/AGENTS.md).
+resource: gcp-e2-mcp
 repo: ~/ws/fish
 sync_paths:
   - models/
-
-workloads:
-  train: runpod-l4
-  label: runpod-cpu32
-  freeze: runpod-cpu32
-
-# Canonical fish.db lives on gcp-e2-mcp at /data/fish/fish.db — not on RunPod.
-# No cross-cloud POSIX mount. Worker disk is the RunPod volume /workspace.
-#   cd ~/ws
-#   compute sync runpod-l4 --push fish
-#   compute sync runpod-l4 --push compute
-#   compute sync runpod-l4 --push shared/cmdline
-#   compute run runpod-l4 --cwd /workspace/fish -- python3 src/fish/runpod_setup.py
-#   source /workspace/fish/env.sh && fish prism-train --gpu
-#   compute sync gcp-e2-mcp --push models/   # finished .prz
-#   compute down runpod-l4

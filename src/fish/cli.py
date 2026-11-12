@@ -133,13 +133,19 @@ def search(
     model_id: str | None = optarg(
         None,
         long_flag="--model-id",
-        help="Retrieval model_id (default: active PRISM or legacy)",
+        help="Retrieval model_id (default: legacy; PRISM is shelved, pass one to try it)",
+    ),
+    no_keyword: bool = optarg(
+        False, long_flag="--no-keyword", action="store_true", help="Vector arm only (no BM25)"
+    ),
+    no_rerank: bool = optarg(
+        False, long_flag="--no-rerank", action="store_true", help="Skip the relevance rerank"
     ),
     *,
     json_output: bool = False,
     md_output: bool = False,
 ) -> int:
-    """ANN search (PRISM/legacy). Hard metadata filters; no keyword hybrid ranking."""
+    """Hybrid search: vector + BM25 keywords fused by rank, then relevance-reranked."""
     from fish.freshness import FishAuthError, ensure_search_ready
 
     load_env()
@@ -171,6 +177,8 @@ def search(
             since=since,
             until=until,
             from_contains=from_addr,
+            keyword=not no_keyword,
+            rerank=False if no_rerank else None,
         )
         results = payload["results"]
     except Exception as exc:
@@ -569,6 +577,37 @@ def qdrant_reindex(
         print(exc, file=sys.stderr)
         return 1
     emit_output(result, json_output=json_output, md=md_output, title="Fish Qdrant reindex")
+    return 0
+
+
+@cmd(output=True)
+def fts_reindex(
+    rebuild: bool = optarg(
+        False,
+        long_flag="--rebuild",
+        action="store_true",
+        help="Empty the keyword index and index every corpus item again",
+    ),
+    no_progress: bool = optarg(
+        False, long_flag="--no-progress", action="store_true", help="Disable progress lines"
+    ),
+    *,
+    json_output: bool = False,
+    md_output: bool = False,
+) -> int:
+    """Build the BM25 keyword index for hybrid search (resumable; run once after upgrade)."""
+    from fish import keyword_index
+    from fish.write_lock import fish_write_lock
+
+    load_env()
+    init_db()
+    with fish_write_lock("fts-reindex"):
+        with db_conn() as db:
+            if rebuild:
+                result = keyword_index.rebuild(db, progress=not no_progress)
+            else:
+                result = keyword_index.backfill(db, progress=not no_progress)
+    emit_output(result, json_output=json_output, md=md_output, title="Fish keyword index")
     return 0
 
 

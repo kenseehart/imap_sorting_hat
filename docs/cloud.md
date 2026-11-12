@@ -112,6 +112,22 @@ times on lock contention.
 fish write-lock-status
 ```
 
+## Keyword index (hybrid search, 2026-11-12)
+
+Search is vector + BM25 (`src/fish/keyword_index.py`, FTS5 table `corpus_fts`
+in `fish.db`, kept in step by triggers). It is built once, after the first
+deploy of this code, and `fish_search` refuses with a clear error until it is:
+
+```bash
+compute run gcp-e2-mcp --cwd /tmp -- \
+  sudo -u mcp env FISH_DB_PATH=/data/fish/fish.db FISH_DATA_DIR=/data/fish \
+  /home/mcp/mcp-gateway/.venv/bin/python -m fish fts-reindex
+```
+
+Resumable (re-run continues), takes the Fish write lock, logs rows/s and an
+ETA. It stores the full body text a second time, so expect `fish.db` to grow
+by roughly the size of the corpus text. `--rebuild` empties and rebuilds it.
+
 ## Scheduled sync
 
 `fish-sync.timer` on the VM runs `python -m fish sync --no-progress` every 6 hours (00:00, 06:00, 12:00, 18:00 UTC).
@@ -162,6 +178,9 @@ compute run gcp-e2-mcp --cwd /tmp -- \
 `test:sms:1` in place. `--missing-only` only fills empty headers (full corpus).
 
 ## Laptop / RunPod (sparse compute)
+
+> **PRISM is shelved (2026-11-12, `docs/prism.md`): nothing below runs.** It is
+> kept for a revisit; `compute.yaml` no longer routes any fish workload to RunPod.
 
 The laptop is for **code** and **uploading imports**. GPU train runs on
 RunPod (`runpod-l4`). Do **not** copy canonical `fish.db` to a worker for

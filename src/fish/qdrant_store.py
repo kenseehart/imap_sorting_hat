@@ -394,6 +394,46 @@ def search(
     return out
 
 
+def filter_ids(
+    collection: str,
+    ids: list[int],
+    *,
+    kinds: list[str] | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    from_contains: str | None = None,
+    account_email: str | None = None,
+    folder: str | None = None,
+    unread_only: bool = False,
+) -> set[int]:
+    """The subset of ``ids`` that pass the same metadata filter ``search``
+    applies, so keyword hits and vector hits obey one definition of every
+    filter (keyword_index has no copy of them)."""
+    qfilter = _build_filter(
+        kinds=kinds,
+        since=since,
+        until=until,
+        from_contains=from_contains,
+        account_email=account_email,
+        folder=folder,
+        unread_only=unread_only,
+    )
+    if not ids:
+        return set()
+    if qfilter is None:
+        return set(ids)
+    ensure_collection(collection)
+    must = [qm.HasIdCondition(has_id=[int(i) for i in ids]), *qfilter.must]
+    points, _ = get_qdrant_client().scroll(
+        collection_name=collection,
+        scroll_filter=qm.Filter(must=must),
+        limit=len(ids),
+        with_payload=False,
+        with_vectors=False,
+    )
+    return {int(p.id) for p in points}
+
+
 def collection_point_count(collection: str) -> int:
     client = get_qdrant_client()
     names = {c.name for c in client.get_collections().collections}

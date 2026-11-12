@@ -1,6 +1,9 @@
-# Agent onboarding — fish (personal PRISM corpus)
+# Agent onboarding — fish (personal corpus: hybrid RAG over mail, SMS, chat)
 
 > **Status**: Active at `/home/ken/ws/fish`. GitHub: [kenseehart/imap_sorting_hat](https://github.com/kenseehart/imap_sorting_hat).
+
+**No PRs: merge finished work straight to `main` and push, in the session that did it**
+(Ken, 2026-11-12, all of Ken's repos; a forgotten stale branch is the bigger risk).
 
 ## Shared resources
 
@@ -8,7 +11,11 @@ Cross-project assets: **`/home/ken/ws/shared`**. Workspace index: **`/home/ken/w
 
 ## What this project is
 
-Personal knowledge corpus with optional **PRISM** retrieval:
+Personal knowledge corpus with **hybrid RAG search** (vector + BM25 keywords,
+fused by rank, relevance-reranked). **PRISM is SHELVED** (Ken, 2026-11-12): its
+training pipeline cost more in time, RAM and idle GPUs than its unmeasured gain;
+the code stays, nothing runs it, and real queries are still logged for a revisit
+(`docs/prism.md`). Sources:
 
 - **Email** — multi-account IMAP sync (1 message = 1 chunk)
 - **SMS** — Android Backup & Restore XML (default filter `(831)535-2442`)
@@ -29,7 +36,14 @@ Binary zip `.prz`. See [`docs/prism.md`](docs/prism.md).
 - **Identity**: `{source_id}.{message_id}` as `corpus_items.source_key` (UNIQUE); integer PK is surrogate for Qdrant/training only — see [`docs/identity.md`](docs/identity.md)
 - **Sync**: `imapclient` → `messages` + mirrored `corpus_items` (kind=email) — **cloud cron on gcp-e2-mcp**
 - **Import**: `fish import-corpus` — SMS, ChatGPT, Claude — see [`docs/import-runbook.md`](docs/import-runbook.md)
-- **Search**: Qdrant ANN (raw or PRISM-adapted); metadata filters applied **in** the vector query (`--since`, `--until`, `--from`, `--account`, …). No keyword hybrid ranking (deferred).
+- **Search** (`src/fish/search.py`, 2026-11-12): (1) Qdrant ANN on the raw OpenAI embedding
+  (`fish_legacy`; a PRISM `--model-id` only when passed); (2) SQLite FTS5 / BM25 over subject,
+  people and body (`src/fish/keyword_index.py`, kept in step by triggers on `corpus_items`);
+  (3) reciprocal rank fusion; (4) the RelevanceAgent prompt reranks the top `FISH_RERANK_K`
+  (default 20) hits on gpt-4o-mini (`src/fish/rerank.py`; `FISH_RERANK=off` or `--no-rerank`
+  skips it). Metadata filters (`--since`, `--until`, `--from`, `--account`, …) bind BOTH arms
+  through one Qdrant filter (`qdrant_store.filter_ids`). **After deploying this, run
+  `fish fts-reindex` once on gcp-e2-mcp**: search refuses until the keyword index is built.
 - **MCP (remote)**: `https://mcp.seehart.com/fish/mcp` (Claude.ai connector)
 - **MCP (local dev)**: `python -m fish.mcp_server` — optional; reads local db unless `FISH_DB_PATH` set
 - **Training**: RelevanceAgent labels → `fish prism-train` (MSE) → `.prz`; then `fish prism-reembed` (from stored raw, no OpenAI) — see [`docs/prism.md`](docs/prism.md), [`docs/cloud.md`](docs/cloud.md)
@@ -96,7 +110,8 @@ fish connect <email>
 | Command | Purpose |
 |---------|---------|
 | `fish connect <email>` | Interactive IMAP/SMTP setup |
-| `fish search <query>` | ANN search (`--since`, `--until`, `--from`, `--kinds`, `--account`, `--folder`, `--model-id`) |
+| `fish search <query>` | Hybrid search (`--since`, `--until`, `--from`, `--kinds`, `--account`, `--folder`; `--no-keyword`, `--no-rerank`, `--model-id`) |
+| `fish fts-reindex` | Build the BM25 keyword index (resumable; once after upgrade; `--rebuild` from scratch) |
 | `fish get <id>` | Get corpus item / message by id |
 | `fish import-corpus <source> <path>` | Import `android-sms`, `chatgpt`, or `claude` |
 | `fish memory` / MCP | `fish_memory_upsert` for agent memories |
@@ -126,7 +141,7 @@ fish connect <email>
 
 ## MCP tools
 
-Read: `fish_search` (auto-syncs when stale; fails loudly on auth errors; `context_json`, `kinds`), `fish_corpus_get`, `fish_embedding_get`, `fish_message_get`, `fish_thread_get`, `fish_sync_status`, `fish_pipeline_status`, `fish_priority_inbox`, `fish_digest`, `fish_topics_*`, `fish_import`, `fish_memory_upsert`
+Read: `fish_search` (hybrid; auto-syncs when stale; fails loudly on auth errors; `context_json`, `kinds`, `keyword`, `rerank`), `fish_corpus_get`, `fish_embedding_get`, `fish_message_get`, `fish_thread_get`, `fish_sync_status`, `fish_pipeline_status`, `fish_priority_inbox`, `fish_digest`, `fish_topics_*`, `fish_import`, `fish_memory_upsert`
 
 Write: `fish_sync_run`, `fish_message_move`, `fish_message_archive`, `fish_bulk_action`, `fish_compose`, `fish_send`
 
@@ -135,14 +150,17 @@ Write: `fish_sync_run`, `fish_message_move`, `fish_message_archive`, `fish_bulk_
 | File | Purpose |
 |------|---------|
 | `~/.config/fish/accounts.yaml` | IMAP/SMTP accounts |
-| `~/.config/fish/fish.env` | `OPENAI_API_KEY`, `FISH_QDRANT_URL`, optional `FISH_PRISM_MODEL`, `FISH_DATA_DIR`, `FISH_DB_PATH` |
+| `~/.config/fish/fish.env` | `OPENAI_API_KEY`, `FISH_QDRANT_URL`, optional `FISH_RERANK` (on/off), `FISH_RERANK_K`, `FISH_RELEVANCE_MODEL`, `FISH_DATA_DIR`, `FISH_DB_PATH` (`FISH_PRISM_MODEL` no longer affects search) |
 | `fish.db` | Corpus + IMAP state + raw embeddings — **cloud:** `/data/fish/fish.db`; **local dev:** `~/.config/fish/fish.db` |
 | Qdrant | ANN indexes — **cloud:** Docker on `gcp-e2-mcp` (`FISH_QDRANT_URL=http://127.0.0.1:6333`) |
 | `models/` | PRISM `.prz` files — **cloud:** `/data/fish/models/` |
 | `~/.config/fish/context_rules.yaml` | Context-based retrieval boosts |
 | `imports/` | Drop zone for export files — **cloud:** `/data/fish/imports/` |
 
-## PRISM
+## PRISM (shelved 2026-11-12)
+
+Nothing in search or the deploy runs PRISM now; search uses a PRISM model only
+when `--model-id` / `model_id` names one. What follows is kept for a revisit.
 
 Objective: \(\mathrm{MSE}(\cos(A_q(q), A_c(c)), r)\) with \(r\) = RelevanceAgent — see [`docs/prism.md`](docs/prism.md).
 
@@ -151,7 +169,8 @@ Objective: \(\mathrm{MSE}(\cos(A_q(q), A_c(c)), r)\) with \(r\) = RelevanceAgent
 FISH_PRISM_MODEL=personal.prz
 ```
 
-Heavy training: RunPod per [`compute.yaml`](compute.yaml), [`docs/cloud.md`](docs/cloud.md), and [`docs/deploy.md`](docs/deploy.md).
+If revived: the adapters train in minutes on CPU, so train on `gcp-e2-mcp` or the laptop;
+never leave a GPU pod up for it (the whole $348 RunPod bill, Jun-Sep 2026, was an idle L4).
 On RunPod, `FISH_DATA_DIR` must be under `/workspace` (fail-fast); MCP and
 `fish.db` stay on `gcp-e2-mcp` — no cross-cloud shared filesystem.
 

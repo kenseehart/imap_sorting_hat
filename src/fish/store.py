@@ -305,6 +305,10 @@ def init_db() -> None:
 
         ensure_legacy_model(db)
         ensure_model_vec_tables(db)
+        from fish.keyword_index import ensure_schema as ensure_keyword_index
+
+        # Keyword index + triggers before any migration inserts corpus rows.
+        ensure_keyword_index(db)
         _migrate_messages_to_corpus(db)
         migrate_training_query_origins(db)
 

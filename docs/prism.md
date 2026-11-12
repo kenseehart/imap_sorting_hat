@@ -1,4 +1,18 @@
-# PRISM for fish (personal email corpus)
+# PRISM for fish (personal email corpus) — SHELVED 2026-11-12
+
+> **Shelved (Ken, 2026-11-12):** *"it's going to be very expensive to use due
+> to prism training and processing ... The small gains of prism might not be
+> worth the trouble."* Search is now hybrid RAG (`src/fish/search.py`:
+> vector + BM25, rank fusion, the RelevanceAgent prompt as a search-time
+> reranker), which uses RelevanceAgent's judgement directly instead of
+> distilling it into adapters. Facts behind the call: the whole RunPod bill
+> for fish ($348, 2026-06-19..09-05) was an L4 pod billed 24 h/day while idle,
+> not training; the adapters are small MLPs that train in minutes on CPU; no
+> NWRA result showing PRISM beating `legacy` was ever recorded in this repo;
+> every model costs another full Qdrant collection on the RAM-bound MCP host.
+> The code stays and real queries are still logged (`training_queries`), so a
+> revisit starts with data: run NWRA of `legacy`+rerank against a PRISM model
+> on the same labelled pairs before reviving it.
 
 PRISM is **not** standard semantic similarity. It trains dual adapters so that
 **adapted cosine approximates RelevanceAgent scores**.
